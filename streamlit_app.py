@@ -414,6 +414,15 @@ def do_signup(email, password):
 
 def do_signin(email, password):
     try:
+        # Defensa: limpiar cualquier sesión previa que pudiera estar contaminada
+        # antes de iniciar la nueva. Evita que el cliente Supabase cacheado quede
+        # con headers/tokens del usuario anterior.
+        try:
+            sb.auth.sign_out()
+        except Exception:
+            pass
+        st.cache_data.clear()
+
         r = sb.auth.sign_in_with_password({"email": email, "password": password})
         # Si es la primera vez que entra (todavía no tiene categorías),
         # le sembramos el set por defecto.
@@ -433,6 +442,7 @@ def do_signout():
         pass
     st.session_state.user = None
     st.cache_data.clear()
+    st.cache_resource.clear()  # fuerza recreación del cliente Supabase con sesión limpia
     st.rerun()
 
 # ============================================================================
