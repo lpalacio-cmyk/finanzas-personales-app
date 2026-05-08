@@ -415,6 +415,13 @@ def do_signup(email, password):
 def do_signin(email, password):
     try:
         r = sb.auth.sign_in_with_password({"email": email, "password": password})
+        # Si es la primera vez que entra (todavía no tiene categorías),
+        # le sembramos el set por defecto.
+        if r.user:
+            try:
+                seed_categorias_si_vacio(r.user.id)
+            except Exception:
+                pass
         return r.user, None
     except Exception as e:
         return None, str(e)
@@ -431,6 +438,70 @@ def do_signout():
 # ============================================================================
 # ACCESO A DATOS: CATEGORÍAS
 # ============================================================================
+CATEGORIAS_DEFAULT = {
+    "Ingreso": [
+        "Sueldo",
+        "Honorarios",
+        "Alquileres cobrados",
+        "Rendimientos / Intereses",
+        "Otros ingresos",
+    ],
+    "Gasto Fijo": [
+        "Alquiler / Expensas",
+        "Servicios (luz/gas/agua)",
+        "Internet",
+        "Telefonía",
+        "Prepaga / Obra social",
+        "Seguros",
+        "Cuotas crédito",
+        "Tarjeta de crédito",
+    ],
+    "Gasto Variable": [
+        "Supermercado",
+        "Comida / Restaurantes",
+        "Transporte / Combustible",
+        "Salud (farmacia/médicos)",
+        "Indumentaria",
+        "Educación",
+        "Entretenimiento",
+        "Hogar y mantenimiento",
+        "Regalos",
+        "Viajes",
+    ],
+    "Ahorro": [
+        "Plazo fijo",
+        "Dólares",
+        "Inversiones (CEDEARs / FCI / Acciones)",
+        "Caja de ahorro",
+        "Otros",
+    ],
+}
+
+def seed_categorias_si_vacio(user_id: str) -> bool:
+    """Si el usuario no tiene categorías, crea el set por defecto.
+    Devuelve True si sembró, False si ya tenía."""
+    try:
+        res = (
+            sb.table("categorias").select("id", count="exact")
+            .eq("user_id", user_id).limit(1).execute()
+        )
+        if (res.count or 0) > 0:
+            return False
+        rows = []
+        for tipo, nombres in CATEGORIAS_DEFAULT.items():
+            for nombre in nombres:
+                rows.append({
+                    "user_id": user_id,
+                    "nombre": nombre,
+                    "tipo": tipo,
+                    "activa": True,
+                })
+        if rows:
+            sb.table("categorias").insert(rows).execute()
+        return True
+    except Exception:
+        # No romper el login si falla el seed
+        return False
 @st.cache_data(ttl=30, show_spinner=False)
 def get_categorias(user_id: str, tipo: str = None, solo_activas: bool = True):
     q = sb.table("categorias").select("*").eq("user_id", user_id)
