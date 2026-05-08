@@ -349,14 +349,6 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 }}
 .mov-row.mov-ingreso .mov-monto {{ color: var(--green); }}
 
-.login-card {{
-    background: white;
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 28px 28px 24px;
-    box-shadow: 0 4px 20px rgba(16, 34, 80, 0.06);
-    margin-top: 8px;
-}}
 .login-footer {{
     text-align: center;
     margin-top: 24px;
@@ -661,14 +653,14 @@ def page_login():
 
     st.markdown(
         "<div style='text-align:center; margin-top:8px;'>"
-        "<h1 style='margin-bottom:4px;'>Finanzas WL</h1>"
+        "<h1 style='margin-bottom:4px;'>Finanzas para protagonistas</h1>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Tu Excel de finanzas, ahora desde el celular"
+        "Tus finanzas desde un solo lugar"
         "</div></div>",
         unsafe_allow_html=True,
     )
 
-    st.markdown("<div class='login-card'>", unsafe_allow_html=True)
+    st.write("")  # respiro entre header y tabs
 
     tab_in, tab_up = st.tabs(["Iniciar sesión", "Crear cuenta"])
 
@@ -711,7 +703,6 @@ def page_login():
                     else:
                         st.success("✅ Cuenta creada. Revisá tu email para confirmar.")
 
-    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown(
         "<div class='login-footer'>WL HNOS &amp; ASOC · Catamarca</div>",
         unsafe_allow_html=True,
