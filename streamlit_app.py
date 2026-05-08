@@ -1,7 +1,7 @@
 """
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
-Versión 2: incluye Estado de Resultados y Flujo de Fondos.
+Versión 2.1: fix de compatibilidad con pandas 2.2+ (applymap → map).
 """
 
 import streamlit as st
@@ -346,7 +346,7 @@ def page_resultados(user):
     )
 
     pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
-    pivot_fmt = pivot.copy().applymap(fmt_money)
+    pivot_fmt = pivot.copy().map(fmt_money)
     pivot_fmt.index.name = "Concepto"
 
     st.dataframe(pivot_fmt, use_container_width=True)
@@ -417,7 +417,7 @@ def page_flujo(user):
     pivot.loc["Saldo acumulado"] = saldo_final
 
     pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
-    pivot_fmt = pivot.copy().applymap(fmt_money)
+    pivot_fmt = pivot.copy().map(fmt_money)
     pivot_fmt.index.name = "Concepto"
 
     st.dataframe(pivot_fmt, use_container_width=True)
