@@ -1,12 +1,15 @@
 """
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
+Versión 2: incluye Estado de Resultados y Flujo de Fondos.
 """
 
 import streamlit as st
 from supabase import create_client, Client
 from datetime import date
+from dateutil.relativedelta import relativedelta
 import pandas as pd
+import io
 
 # --- Configuración de página ---
 st.set_page_config(
@@ -120,6 +123,48 @@ def fmt_money(n):
         return str(n)
 
 
+def df_movimientos(user_id):
+    movs = get_movimientos(user_id)
+    if not movs:
+        return pd.DataFrame()
+    df = pd.DataFrame(movs)
+    df["fecha_devengo"] = pd.to_datetime(df["fecha_devengo"])
+    df["inicio_pago"] = pd.to_datetime(df["inicio_pago"])
+    df["monto_total"] = df["monto_total"].astype(float)
+    return df
+
+
+def expandir_a_caja(df):
+    """Expande cada movimiento en N filas (una por cuota), con su mes de pago."""
+    if df.empty:
+        return df
+    filas = []
+    for _, m in df.iterrows():
+        cuotas = int(m["cuotas"])
+        monto_cuota = float(m["monto_total"]) / cuotas
+        for i in range(cuotas):
+            mes_pago = m["inicio_pago"] + relativedelta(months=i)
+            filas.append({
+                "tipo": m["tipo"],
+                "categoria": m["categoria"],
+                "concepto": m["concepto"],
+                "monto_cuota": monto_cuota,
+                "mes_pago": mes_pago.replace(day=1),
+                "n_cuota": i + 1,
+                "total_cuotas": cuotas,
+            })
+    return pd.DataFrame(filas)
+
+
+def df_to_excel_bytes(df_dict):
+    """Convierte un dict {nombre_hoja: df} a bytes Excel descargables."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for nombre, df in df_dict.items():
+            df.to_excel(writer, sheet_name=nombre, index=False)
+    return output.getvalue()
+
+
 # --- Pantalla de login ---
 def page_login():
     st.markdown("# 💰 Finanzas WL")
@@ -139,7 +184,7 @@ def page_login():
                     if "Invalid login credentials" in err:
                         st.error("Email o contraseña incorrectos")
                     elif "Email not confirmed" in err:
-                        st.error("Confirmá tu email antes de iniciar sesión (revisá tu bandeja de entrada).")
+                        st.error("Confirmá tu email antes de iniciar sesión.")
                     else:
                         st.error(f"Error: {err}")
                 else:
@@ -165,14 +210,13 @@ def page_login():
                     if err:
                         st.error(f"Error: {err}")
                     else:
-                        st.success("✅ Cuenta creada. Revisá tu email para confirmar y después iniciá sesión.")
+                        st.success("✅ Cuenta creada. Revisá tu email para confirmar.")
 
 
 # --- Pantalla: Cargar movimiento ---
 def page_cargar(user):
     st.markdown("### Nuevo movimiento")
 
-    # Tipo fuera del form para que el dropdown de Categoría se actualice al cambiarlo
     tipo = st.selectbox(
         "Tipo",
         ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"],
@@ -206,7 +250,7 @@ def page_cargar(user):
         if cuotas > 1 and monto > 0:
             cuota_mensual = monto / cuotas
             st.info(
-                f"📊 **Estado de Resultados**: {fmt_money(monto)} en {fecha_devengo.strftime('%m/%Y')} (entero, devengado).\n\n"
+                f"📊 **Estado de Resultados**: {fmt_money(monto)} en {fecha_devengo.strftime('%m/%Y')} (devengado).\n\n"
                 f"📅 **Flujo de Fondos**: {fmt_money(cuota_mensual)}/mes × {cuotas} desde {inicio_pago.strftime('%m/%Y')} (caja)."
             )
 
@@ -225,7 +269,6 @@ def page_cargar(user):
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
 
-    # Últimos 10 movimientos
     st.divider()
     st.markdown("##### Últimos movimientos")
     movs = get_movimientos(user.id, limit=10)
@@ -250,28 +293,157 @@ def page_cargar(user):
 # --- Pantalla: Ver movimientos ---
 def page_ver(user):
     st.markdown("### Todos los movimientos")
-    movs = get_movimientos(user.id)
-    if not movs:
+    df = df_movimientos(user.id)
+    if df.empty:
         st.info("No tenés movimientos cargados todavía.")
         return
 
-    df = pd.DataFrame(movs)
-    df["Devengo"] = pd.to_datetime(df["fecha_devengo"]).dt.strftime("%d/%m/%Y")
-    df["Inicio pago"] = pd.to_datetime(df["inicio_pago"]).dt.strftime("%d/%m/%Y")
-    df = df[["Devengo", "tipo", "categoria", "concepto", "monto_total", "cuotas", "Inicio pago"]]
-    df.columns = ["Devengo", "Tipo", "Categoría", "Concepto", "Monto", "Cuotas", "Inicio pago"]
-
-    # Resumen rápido arriba
-    total_ingresos = sum(m["monto_total"] for m in movs if m["tipo"] == "Ingreso")
-    total_gastos = sum(m["monto_total"] for m in movs if m["tipo"] in ("Gasto Fijo", "Gasto Variable"))
-    total_ahorro = sum(m["monto_total"] for m in movs if m["tipo"] == "Ahorro")
+    total_ing = df.loc[df["tipo"] == "Ingreso", "monto_total"].sum()
+    total_gas = df.loc[df["tipo"].isin(["Gasto Fijo", "Gasto Variable"]), "monto_total"].sum()
+    total_aho = df.loc[df["tipo"] == "Ahorro", "monto_total"].sum()
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Ingresos", fmt_money(total_ingresos))
-    col2.metric("Gastos", fmt_money(total_gastos))
-    col3.metric("Ahorro", fmt_money(total_ahorro))
+    col1.metric("Ingresos", fmt_money(total_ing))
+    col2.metric("Gastos", fmt_money(total_gas))
+    col3.metric("Ahorro", fmt_money(total_aho))
 
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    df_view = df.copy()
+    df_view["Devengo"] = df_view["fecha_devengo"].dt.strftime("%d/%m/%Y")
+    df_view["Inicio pago"] = df_view["inicio_pago"].dt.strftime("%d/%m/%Y")
+    df_view = df_view[["Devengo", "tipo", "categoria", "concepto", "monto_total", "cuotas", "Inicio pago"]]
+    df_view.columns = ["Devengo", "Tipo", "Categoría", "Concepto", "Monto", "Cuotas", "Inicio pago"]
+    st.dataframe(df_view, hide_index=True, use_container_width=True)
+
+
+# --- Pantalla: Estado de Resultados ---
+def page_resultados(user):
+    st.markdown("### Estado de Resultados")
+    st.caption("Criterio devengado · Agrupado por mes de la fecha de devengo")
+
+    df = df_movimientos(user.id)
+    if df.empty:
+        st.info("No tenés movimientos cargados todavía.")
+        return
+
+    df["mes"] = df["fecha_devengo"].dt.to_period("M").dt.to_timestamp()
+
+    pivot = df.pivot_table(
+        index="tipo",
+        columns="mes",
+        values="monto_total",
+        aggfunc="sum",
+        fill_value=0,
+    )
+
+    orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
+    pivot = pivot.reindex([t for t in orden if t in pivot.index])
+
+    pivot.loc["Resultado del período"] = (
+        (pivot.loc["Ingreso"] if "Ingreso" in pivot.index else 0)
+        - (pivot.loc["Gasto Fijo"] if "Gasto Fijo" in pivot.index else 0)
+        - (pivot.loc["Gasto Variable"] if "Gasto Variable" in pivot.index else 0)
+        - (pivot.loc["Ahorro"] if "Ahorro" in pivot.index else 0)
+    )
+
+    pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
+    pivot_fmt = pivot.copy().applymap(fmt_money)
+    pivot_fmt.index.name = "Concepto"
+
+    st.dataframe(pivot_fmt, use_container_width=True)
+
+    st.markdown("##### Detalle por categoría")
+    mes_sel = st.selectbox(
+        "Seleccionar mes",
+        options=sorted(df["mes"].unique(), reverse=True),
+        format_func=lambda d: pd.Timestamp(d).strftime("%m/%Y"),
+    )
+    df_mes = df[df["mes"] == mes_sel]
+    detalle = df_mes.groupby(["tipo", "categoria"], as_index=False)["monto_total"].sum()
+    detalle.columns = ["Tipo", "Categoría", "Monto"]
+    detalle["Monto"] = detalle["Monto"].apply(fmt_money)
+    st.dataframe(detalle, hide_index=True, use_container_width=True)
+
+    excel = df_to_excel_bytes({"Estado de Resultados": pivot.reset_index(),
+                               "Detalle": detalle})
+    st.download_button(
+        "Descargar Estado de Resultados (Excel)",
+        data=excel,
+        file_name="estado_resultados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# --- Pantalla: Flujo de Fondos ---
+def page_flujo(user):
+    st.markdown("### Flujo de Fondos")
+    st.caption("Criterio caja · Cuotas distribuidas en el mes que corresponde")
+
+    df = df_movimientos(user.id)
+    if df.empty:
+        st.info("No tenés movimientos cargados todavía.")
+        return
+
+    col1, col2 = st.columns([2, 1])
+    with col2:
+        saldo_inicial = st.number_input("Saldo inicial", value=0.0, step=10000.0, format="%.2f")
+
+    df_caja = expandir_a_caja(df)
+
+    pivot = df_caja.pivot_table(
+        index="tipo",
+        columns="mes_pago",
+        values="monto_cuota",
+        aggfunc="sum",
+        fill_value=0,
+    )
+
+    orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
+    pivot = pivot.reindex([t for t in orden if t in pivot.index])
+
+    flujo_neto = (
+        (pivot.loc["Ingreso"] if "Ingreso" in pivot.index else 0)
+        - (pivot.loc["Gasto Fijo"] if "Gasto Fijo" in pivot.index else 0)
+        - (pivot.loc["Gasto Variable"] if "Gasto Variable" in pivot.index else 0)
+        - (pivot.loc["Ahorro"] if "Ahorro" in pivot.index else 0)
+    )
+
+    pivot.loc["Flujo neto del mes"] = flujo_neto
+
+    saldo_final = []
+    saldo = saldo_inicial
+    for v in flujo_neto:
+        saldo += v
+        saldo_final.append(saldo)
+    pivot.loc["Saldo acumulado"] = saldo_final
+
+    pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
+    pivot_fmt = pivot.copy().applymap(fmt_money)
+    pivot_fmt.index.name = "Concepto"
+
+    st.dataframe(pivot_fmt, use_container_width=True)
+
+    st.markdown("##### Detalle de cuotas por mes")
+    mes_sel = st.selectbox(
+        "Seleccionar mes",
+        options=sorted(df_caja["mes_pago"].unique(), reverse=True),
+        format_func=lambda d: pd.Timestamp(d).strftime("%m/%Y"),
+        key="flujo_mes",
+    )
+    df_mes = df_caja[df_caja["mes_pago"] == mes_sel].copy()
+    df_mes["Cuota"] = df_mes.apply(lambda r: f"{r['n_cuota']}/{r['total_cuotas']}", axis=1)
+    df_mes["Monto"] = df_mes["monto_cuota"].apply(fmt_money)
+    df_mes = df_mes[["tipo", "categoria", "concepto", "Cuota", "Monto"]]
+    df_mes.columns = ["Tipo", "Categoría", "Concepto", "Cuota", "Monto"]
+    st.dataframe(df_mes, hide_index=True, use_container_width=True)
+
+    excel = df_to_excel_bytes({"Flujo de Fondos": pivot.reset_index(),
+                               "Detalle cuotas": df_mes})
+    st.download_button(
+        "Descargar Flujo de Fondos (Excel)",
+        data=excel,
+        file_name="flujo_de_fondos.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 # --- App principal (logueado) ---
@@ -285,12 +457,18 @@ def app(user):
     page = st.sidebar.radio("Menú", [
         "📝 Cargar movimiento",
         "📋 Ver movimientos",
+        "📊 Estado de Resultados",
+        "📅 Flujo de Fondos",
     ])
 
     if "Cargar" in page:
         page_cargar(user)
     elif "Ver" in page:
         page_ver(user)
+    elif "Estado" in page:
+        page_resultados(user)
+    elif "Flujo" in page:
+        page_flujo(user)
 
 
 # --- Router ---
