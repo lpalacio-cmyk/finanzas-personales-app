@@ -2,6 +2,14 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.3 — Tanda 2: Saldos iniciales por mes (persistentes y editables)
+- Tabla nueva en Supabase: saldos_iniciales (user_id, mes, monto)
+- Saldo inicial de cada mes se calcula encadenadamente desde el primero
+- Si hay ajuste manual para un mes, ese sobreescribe el cálculo
+- Flujo de Fondos: se agrega fila "Saldo inicial" al principio del pivot
+- Form para ajustar el saldo inicial de cualquier mes y persistirlo
+- Bug resuelto: el saldo inicial ya no se borra al cambiar de pestaña
+
 Versión 3.2 — Tanda 1 de mejoras UX:
 - Formato monetario es-AR ($77.569,90 con punto miles y coma decimal)
 - Separadores es-AR aplicados también a tooltips y axis de Plotly
@@ -619,6 +627,57 @@ def delete_movimiento(user_id, mov_id):
     )
 
 # ============================================================================
+# ACCESO A DATOS: SALDOS INICIALES MANUALES
+# ============================================================================
+@st.cache_data(ttl=30, show_spinner=False)
+def get_saldos_iniciales_manuales(user_id: str) -> dict:
+    """
+    Retorna un dict {date(yyyy,mm,01): monto_float} con los ajustes manuales
+    del saldo inicial cargados por el usuario.
+    """
+    res = (
+        sb.table("saldos_iniciales").select("mes, monto")
+        .eq("user_id", user_id).execute().data
+    )
+    out = {}
+    for r in res:
+        d = pd.to_datetime(r["mes"]).date().replace(day=1)
+        out[d] = float(r["monto"])
+    return out
+
+def upsert_saldo_inicial(user_id, mes_date, monto):
+    """
+    Inserta o actualiza el saldo inicial manual del mes indicado.
+    `mes_date` debe ser un objeto date; se normaliza al primer día del mes.
+    """
+    mes_norm = mes_date.replace(day=1)
+    payload = {
+        "user_id": user_id,
+        "mes": mes_norm.isoformat(),
+        "monto": float(monto),
+        "updated_at": "now()",
+    }
+    # Si ya existe (user_id+mes), update; si no, insert.
+    existing = (
+        sb.table("saldos_iniciales").select("id")
+        .eq("user_id", user_id).eq("mes", mes_norm.isoformat()).execute().data
+    )
+    if existing:
+        return (
+            sb.table("saldos_iniciales")
+            .update({"monto": float(monto), "updated_at": "now()"})
+            .eq("user_id", user_id).eq("mes", mes_norm.isoformat()).execute()
+        )
+    return sb.table("saldos_iniciales").insert(payload).execute()
+
+def delete_saldo_inicial(user_id, mes_date):
+    mes_norm = mes_date.replace(day=1)
+    return (
+        sb.table("saldos_iniciales").delete()
+        .eq("user_id", user_id).eq("mes", mes_norm.isoformat()).execute()
+    )
+
+# ============================================================================
 # HELPERS
 # ============================================================================
 def fmt_money(n, decimals: int = 2):
@@ -1194,80 +1253,209 @@ def page_flujo(user):
         return
 
     df_caja = expandir_a_caja(df)
+    if df_caja.empty:
+        st.info("No hay cuotas que mostrar.")
+        return
 
-    if not df_caja.empty:
-        hasta_def = df_caja["mes_pago"].max().date()
-        desde_def = (hasta_def - relativedelta(months=11)).replace(day=1)
-        minimo = df_caja["mes_pago"].min().date()
-        if desde_def < minimo:
-            desde_def = minimo.replace(day=1)
-    else:
-        hoy = date.today()
-        desde_def, hasta_def = hoy.replace(day=1), hoy
+    # --- Rango de fechas por default (últimos 12 meses) ---
+    hasta_def = df_caja["mes_pago"].max().date()
+    desde_def = (hasta_def - relativedelta(months=11)).replace(day=1)
+    minimo = df_caja["mes_pago"].min().date()
+    if desde_def < minimo:
+        desde_def = minimo.replace(day=1)
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        fechas = st.date_input(
-            "Rango de fechas (mes de pago)",
-            value=(desde_def, hasta_def),
-            format="DD/MM/YYYY",
-            key="rango_ff",
-        )
-    with col2:
-        saldo_inicial = st.number_input("Saldo inicial", value=None,
-                                        step=10000.0, format="%.2f",
-                                        placeholder="0,00")
-    saldo_inicial = saldo_inicial or 0.0
-
+    fechas = st.date_input(
+        "Rango de fechas (mes de pago)",
+        value=(desde_def, hasta_def),
+        format="DD/MM/YYYY",
+        key="rango_ff",
+    )
     if isinstance(fechas, tuple) and len(fechas) == 2:
         desde, hasta = fechas
     else:
         desde, hasta = desde_def, hasta_def
 
-    df_caja = df_caja[
-        (df_caja["mes_pago"].dt.date >= desde) &
-        (df_caja["mes_pago"].dt.date <= hasta)
-    ].copy()
-
-    if df_caja.empty:
-        st.info("No hay cuotas en el rango seleccionado.")
-        return
-
-    pivot = df_caja.pivot_table(
+    # ------------------------------------------------------------------------
+    # CÁLCULO DE SALDOS ENCADENADO (sobre TODOS los meses, no solo el rango)
+    # ------------------------------------------------------------------------
+    pivot_completo = df_caja.pivot_table(
         index="tipo", columns="mes_pago", values="monto_cuota",
         aggfunc="sum", fill_value=0,
     )
     orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
-    pivot = pivot.reindex([t for t in orden if t in pivot.index])
+    pivot_completo = pivot_completo.reindex([t for t in orden if t in pivot_completo.index])
 
-    flujo_neto = (
-        (pivot.loc["Ingreso"] if "Ingreso" in pivot.index else 0)
-        - (pivot.loc["Gasto Fijo"] if "Gasto Fijo" in pivot.index else 0)
-        - (pivot.loc["Gasto Variable"] if "Gasto Variable" in pivot.index else 0)
-        - (pivot.loc["Ahorro"] if "Ahorro" in pivot.index else 0)
+    flujo_neto_completo = (
+        (pivot_completo.loc["Ingreso"] if "Ingreso" in pivot_completo.index else 0)
+        - (pivot_completo.loc["Gasto Fijo"] if "Gasto Fijo" in pivot_completo.index else 0)
+        - (pivot_completo.loc["Gasto Variable"] if "Gasto Variable" in pivot_completo.index else 0)
+        - (pivot_completo.loc["Ahorro"] if "Ahorro" in pivot_completo.index else 0)
     )
-    pivot.loc["Flujo neto"] = flujo_neto
 
-    saldo_final = []
-    saldo = saldo_inicial
-    for v in flujo_neto:
-        saldo += v
-        saldo_final.append(saldo)
-    pivot.loc["Saldo final"] = saldo_final
+    # Ajustes manuales cargados por el usuario
+    ajustes_manuales = get_saldos_iniciales_manuales(user.id)
 
-    pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
-    pivot_fmt = pivot.copy().map(fmt_money)
+    # Recorremos meses en orden cronológico y encadenamos saldos
+    meses_todos = list(flujo_neto_completo.index)
+    saldos_ini = {}   # {Timestamp -> float}
+    saldos_fin = {}   # {Timestamp -> float}
+    es_manual = {}    # {Timestamp -> bool}
+
+    saldo_anterior = None  # saldo final del mes previo
+    for mes_ts in meses_todos:
+        mes_d = mes_ts.date().replace(day=1) if hasattr(mes_ts, "date") else mes_ts
+        if mes_d in ajustes_manuales:
+            si = ajustes_manuales[mes_d]
+            es_manual[mes_ts] = True
+        else:
+            si = saldo_anterior if saldo_anterior is not None else 0.0
+            es_manual[mes_ts] = False
+        sf = si + float(flujo_neto_completo.loc[mes_ts])
+        saldos_ini[mes_ts] = si
+        saldos_fin[mes_ts] = sf
+        saldo_anterior = sf
+
+    # ------------------------------------------------------------------------
+    # Filtrar al rango pedido para mostrar
+    # ------------------------------------------------------------------------
+    meses_rango = [m for m in meses_todos
+                   if desde <= (m.date() if hasattr(m, "date") else m) <= hasta]
+    if not meses_rango:
+        st.info("No hay cuotas en el rango seleccionado.")
+        return
+
+    pivot_rango = pivot_completo.loc[:, meses_rango].copy()
+
+    # ------------------------------------------------------------------------
+    # Armar tabla final: Saldo inicial al principio, Flujo neto y Saldo final al final
+    # ------------------------------------------------------------------------
+    filas_ordenadas = ["Saldo inicial"] + list(pivot_rango.index) + ["Flujo neto", "Saldo final"]
+    pivot_final = pd.DataFrame(index=filas_ordenadas, columns=pivot_rango.columns, dtype=float)
+
+    for m in meses_rango:
+        pivot_final.loc["Saldo inicial", m] = saldos_ini[m]
+        for tipo in pivot_rango.index:
+            pivot_final.loc[tipo, m] = pivot_rango.loc[tipo, m]
+        pivot_final.loc["Flujo neto", m] = float(flujo_neto_completo.loc[m])
+        pivot_final.loc["Saldo final", m] = saldos_fin[m]
+
+    pivot_final.columns = [c.strftime("%m/%Y") for c in pivot_final.columns]
+    pivot_fmt = pivot_final.copy().map(fmt_money)
     pivot_fmt.index.name = "Concepto"
     st.dataframe(pivot_fmt, use_container_width=True)
 
+    # Aviso si el primer mes con datos no tiene saldo inicial manual y arrancó en 0
+    primer_mes_global = meses_todos[0]
+    primer_mes_global_d = (primer_mes_global.date().replace(day=1)
+                           if hasattr(primer_mes_global, "date") else primer_mes_global)
+    if primer_mes_global_d not in ajustes_manuales:
+        primer_lbl = primer_mes_global.strftime("%m/%Y")
+        st.caption(
+            f"⚠ El primer mes con movimientos ({primer_lbl}) arranca con saldo inicial $0,00. "
+            f"Si tenías plata antes de empezar a usar la app, ajustá su saldo inicial abajo."
+        )
+
+    # Lista de ajustes manuales activos dentro del rango visible
+    manuales_en_rango = [(m, saldos_ini[m]) for m in meses_rango if es_manual[m]]
+    if manuales_en_rango:
+        lineas = "  \n".join(
+            [f"- **{m.strftime('%m/%Y')}**: {fmt_money(v)}" for m, v in manuales_en_rango]
+        )
+        st.caption("✏ Meses con ajuste manual (los manuales sobreescriben el cálculo):  \n" + lineas)
+
+    # ------------------------------------------------------------------------
+    # FORM: ajustar saldo inicial de un mes
+    # ------------------------------------------------------------------------
+    st.divider()
+    st.markdown("##### ✏ Ajustar saldo inicial")
+    st.caption(
+        "El saldo inicial de cada mes se calcula automáticamente como el saldo final "
+        "del mes anterior. Si necesitás reconciliar diferencias o fijar el saldo del "
+        "primer mes, cargá un ajuste manual acá. Los ajustes manuales sobreescriben el cálculo."
+    )
+
+    meses_opts_lbl = [m.strftime("%m/%Y") for m in meses_rango]
+    meses_opts_ts = list(meses_rango)
+
+    with st.form("ajustar_saldo", clear_on_submit=False):
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            mes_idx = st.selectbox(
+                "Mes",
+                options=list(range(len(meses_opts_lbl))),
+                format_func=lambda i: meses_opts_lbl[i],
+                index=0,
+                key="aj_mes_idx",
+            )
+        mes_ts_sel = meses_opts_ts[mes_idx]
+        valor_actual = float(saldos_ini[mes_ts_sel])
+        es_manual_sel = es_manual[mes_ts_sel]
+        with col2:
+            monto_aj = st.number_input(
+                "Saldo inicial",
+                value=valor_actual,
+                step=10000.0,
+                format="%.2f",
+                key="aj_monto",
+            )
+        with col3:
+            st.markdown('<div style="height:28px;"></div>', unsafe_allow_html=True)
+            ok_aj = st.form_submit_button("💾 Guardar", use_container_width=True)
+
+        origen = "manual" if es_manual_sel else "calculado"
+        st.caption(
+            f"Valor actual de {meses_opts_lbl[mes_idx]}: **{fmt_money(valor_actual)}** ({origen})."
+        )
+
+        if ok_aj:
+            try:
+                upsert_saldo_inicial(user.id, mes_ts_sel.date(), monto_aj)
+                st.success(
+                    f"✅ Saldo inicial de {meses_opts_lbl[mes_idx]} guardado: {fmt_money(monto_aj)}"
+                )
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error al guardar: {e}")
+
+    # ------------------------------------------------------------------------
+    # Quitar ajuste manual (volver al cálculo automático)
+    # ------------------------------------------------------------------------
+    if manuales_en_rango:
+        with st.expander("Quitar ajuste manual (volver al cálculo automático)"):
+            opts_quitar = [m.strftime("%m/%Y") for m, _ in manuales_en_rango]
+            mes_quitar_idx = st.selectbox(
+                "Mes a quitar",
+                options=list(range(len(opts_quitar))),
+                format_func=lambda i: opts_quitar[i],
+                key="quitar_mes_idx",
+            )
+            if st.button("🗑 Quitar ajuste", key="btn_quitar_aj"):
+                mes_ts_q = manuales_en_rango[mes_quitar_idx][0]
+                try:
+                    delete_saldo_inicial(user.id, mes_ts_q.date())
+                    st.success(f"Ajuste manual de {opts_quitar[mes_quitar_idx]} eliminado")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # ------------------------------------------------------------------------
+    # Detalle de cuotas por mes (igual que antes)
+    # ------------------------------------------------------------------------
+    st.divider()
     st.markdown("##### Detalle de cuotas por mes")
+    df_caja_rango = df_caja[
+        (df_caja["mes_pago"].dt.date >= desde) &
+        (df_caja["mes_pago"].dt.date <= hasta)
+    ].copy()
     mes_sel = st.selectbox(
         "Seleccionar mes",
-        options=sorted(df_caja["mes_pago"].unique(), reverse=True),
+        options=sorted(df_caja_rango["mes_pago"].unique(), reverse=True),
         format_func=lambda d: pd.Timestamp(d).strftime("%m/%Y"),
         key="flujo_mes_detalle",
     )
-    df_mes = df_caja[df_caja["mes_pago"] == mes_sel].copy()
+    df_mes = df_caja_rango[df_caja_rango["mes_pago"] == mes_sel].copy()
     df_mes["Cuota"] = df_mes.apply(lambda r: f"{r['n_cuota']}/{r['total_cuotas']}", axis=1)
     df_mes["Monto"] = df_mes["monto_cuota"].apply(fmt_money)
     df_mes = df_mes[["tipo", "categoria", "concepto", "Cuota", "Monto"]]
@@ -1275,7 +1463,7 @@ def page_flujo(user):
     st.dataframe(df_mes, hide_index=True, use_container_width=True)
 
     excel = df_to_excel_bytes({
-        "Flujo de Fondos": pivot.reset_index(),
+        "Flujo de Fondos": pivot_final.reset_index(),
         "Detalle cuotas": df_mes,
     })
     st.download_button(
