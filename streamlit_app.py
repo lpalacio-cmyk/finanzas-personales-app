@@ -2,6 +2,16 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.5 — Tanda 3: Pestañas Inicio y Dashboard
+- Pestaña "🏠 Inicio" como default al loguearse: bienvenida, resumen rápido,
+  guía de pestañas y aclaración corta de devengado vs caja.
+- Pestaña "📊 Dashboard" con KPIs del mes seleccionado, evolución del saldo,
+  evolución mensual con selector de serie (resuelve el problema de escala
+  cuando se mostraban Ingresos vs Gastos en un mismo gráfico) y gastos por
+  categoría del mes.
+- Refactor: cálculo de saldos encadenados extraído a calcular_estado_flujo()
+  para que page_flujo y page_dashboard compartan la misma fuente de verdad.
+
 Versión 3.4 — Tanda 2.1: Saldo inicial como AJUSTE ADITIVO (no override)
 - El monto en saldos_iniciales se interpreta como un DELTA sobre el cálculo automático.
 - Fórmula: Saldo inicial M = Saldo final M-1 + Ajuste manual M
@@ -763,6 +773,78 @@ def rango_fechas_default(df, columna="fecha_devengo"):
     return desde, hasta
 
 # ============================================================================
+# CÁLCULO DE ESTADO DE FLUJO (criterio caja)
+# ============================================================================
+def calcular_estado_flujo(user_id: str):
+    """
+    Calcula todo el estado de Flujo de Fondos del usuario en criterio caja.
+    Se usa tanto en page_flujo (para la tabla detallada) como en page_dashboard
+    (para los KPIs y gráficos).
+
+    Devuelve None si el usuario no tiene movimientos. Si tiene, retorna un dict:
+        {
+            "df_caja":          DataFrame de cuotas expandidas
+            "pivot_completo":   DataFrame pivot indexado por tipo, columnas = meses
+            "flujo_neto":       Series indexada por mes con el flujo neto
+            "meses_todos":      lista de Timestamps de meses con datos (ordenados)
+            "ajustes_manuales": dict {date(yyyy,mm,01) -> ajuste_float}
+            "saldo_auto":       dict {mes_ts -> saldo inicial sin ajuste}
+            "ajuste":           dict {mes_ts -> ajuste aplicado al mes}
+            "saldos_ini":       dict {mes_ts -> saldo inicial efectivo (auto + ajuste)}
+            "saldos_fin":       dict {mes_ts -> saldo final (saldos_ini + flujo)}
+        }
+    """
+    df = df_movimientos(user_id)
+    if df.empty:
+        return None
+    df_caja = expandir_a_caja(df)
+    if df_caja.empty:
+        return None
+
+    pivot_completo = df_caja.pivot_table(
+        index="tipo", columns="mes_pago", values="monto_cuota",
+        aggfunc="sum", fill_value=0,
+    )
+    orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
+    pivot_completo = pivot_completo.reindex([t for t in orden if t in pivot_completo.index])
+
+    flujo_neto = (
+        (pivot_completo.loc["Ingreso"] if "Ingreso" in pivot_completo.index else 0)
+        - (pivot_completo.loc["Gasto Fijo"] if "Gasto Fijo" in pivot_completo.index else 0)
+        - (pivot_completo.loc["Gasto Variable"] if "Gasto Variable" in pivot_completo.index else 0)
+        - (pivot_completo.loc["Ahorro"] if "Ahorro" in pivot_completo.index else 0)
+    )
+
+    ajustes_manuales = get_saldos_iniciales_manuales(user_id)
+
+    meses_todos = list(flujo_neto.index)
+    saldo_auto, ajuste_map, saldos_ini, saldos_fin = {}, {}, {}, {}
+    saldo_anterior = 0.0
+    for mes_ts in meses_todos:
+        mes_d = mes_ts.date().replace(day=1) if hasattr(mes_ts, "date") else mes_ts
+        auto = saldo_anterior
+        aj = float(ajustes_manuales.get(mes_d, 0.0))
+        si = auto + aj
+        sf = si + float(flujo_neto.loc[mes_ts])
+        saldo_auto[mes_ts] = auto
+        ajuste_map[mes_ts] = aj
+        saldos_ini[mes_ts] = si
+        saldos_fin[mes_ts] = sf
+        saldo_anterior = sf
+
+    return {
+        "df_caja": df_caja,
+        "pivot_completo": pivot_completo,
+        "flujo_neto": flujo_neto,
+        "meses_todos": meses_todos,
+        "ajustes_manuales": ajustes_manuales,
+        "saldo_auto": saldo_auto,
+        "ajuste": ajuste_map,
+        "saldos_ini": saldos_ini,
+        "saldos_fin": saldos_fin,
+    }
+
+# ============================================================================
 # UI HELPERS
 # ============================================================================
 def render_logo(ancho_px: int = 160):
@@ -1266,10 +1348,22 @@ def page_flujo(user):
         st.info("No tenés movimientos cargados todavía.")
         return
 
-    df_caja = expandir_a_caja(df)
-    if df_caja.empty:
+    # ------------------------------------------------------------------------
+    # CÁLCULO COMPARTIDO con page_dashboard (sobre TODOS los meses)
+    # ------------------------------------------------------------------------
+    estado = calcular_estado_flujo(user.id)
+    if estado is None:
         st.info("No hay cuotas que mostrar.")
         return
+    df_caja = estado["df_caja"]
+    pivot_completo = estado["pivot_completo"]
+    flujo_neto_completo = estado["flujo_neto"]
+    meses_todos = estado["meses_todos"]
+    ajustes_manuales = estado["ajustes_manuales"]
+    saldo_auto = estado["saldo_auto"]
+    ajuste = estado["ajuste"]
+    saldos_ini = estado["saldos_ini"]
+    saldos_fin = estado["saldos_fin"]
 
     # --- Rango de fechas por default (últimos 12 meses) ---
     hasta_def = df_caja["mes_pago"].max().date()
@@ -1288,51 +1382,6 @@ def page_flujo(user):
         desde, hasta = fechas
     else:
         desde, hasta = desde_def, hasta_def
-
-    # ------------------------------------------------------------------------
-    # CÁLCULO DE SALDOS ENCADENADO (sobre TODOS los meses, no solo el rango)
-    # ------------------------------------------------------------------------
-    pivot_completo = df_caja.pivot_table(
-        index="tipo", columns="mes_pago", values="monto_cuota",
-        aggfunc="sum", fill_value=0,
-    )
-    orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
-    pivot_completo = pivot_completo.reindex([t for t in orden if t in pivot_completo.index])
-
-    flujo_neto_completo = (
-        (pivot_completo.loc["Ingreso"] if "Ingreso" in pivot_completo.index else 0)
-        - (pivot_completo.loc["Gasto Fijo"] if "Gasto Fijo" in pivot_completo.index else 0)
-        - (pivot_completo.loc["Gasto Variable"] if "Gasto Variable" in pivot_completo.index else 0)
-        - (pivot_completo.loc["Ahorro"] if "Ahorro" in pivot_completo.index else 0)
-    )
-
-    # Ajustes manuales cargados por el usuario (delta sobre el cálculo automático)
-    ajustes_manuales = get_saldos_iniciales_manuales(user.id)
-
-    # Recorremos meses en orden cronológico y encadenamos saldos.
-    # Para cada mes:
-    #   saldo_automatico = saldo_final del mes anterior (o 0 si es el primero)
-    #   ajuste = ajustes_manuales.get(mes, 0)
-    #   saldo_inicial = saldo_automatico + ajuste
-    #   saldo_final = saldo_inicial + flujo_neto
-    meses_todos = list(flujo_neto_completo.index)
-    saldo_auto = {}   # {Timestamp -> float}  saldo inicial sin ajuste
-    ajuste = {}       # {Timestamp -> float}  delta cargado (0 si no hay)
-    saldos_ini = {}   # {Timestamp -> float}  saldo inicial efectivo (auto + ajuste)
-    saldos_fin = {}   # {Timestamp -> float}  saldo final del mes
-
-    saldo_anterior = 0.0  # saldo final del mes previo
-    for mes_ts in meses_todos:
-        mes_d = mes_ts.date().replace(day=1) if hasattr(mes_ts, "date") else mes_ts
-        auto = saldo_anterior
-        aj = float(ajustes_manuales.get(mes_d, 0.0))
-        si = auto + aj
-        sf = si + float(flujo_neto_completo.loc[mes_ts])
-        saldo_auto[mes_ts] = auto
-        ajuste[mes_ts] = aj
-        saldos_ini[mes_ts] = si
-        saldos_fin[mes_ts] = sf
-        saldo_anterior = sf
 
     # ------------------------------------------------------------------------
     # Filtrar al rango pedido para mostrar
@@ -1639,6 +1688,293 @@ def _row_categoria(user, c, activa):
                         st.error(f"Error: {e}")
 
 # ============================================================================
+# PANTALLA: INICIO (DEFAULT AL LOGUEARSE)
+# ============================================================================
+def _nombre_de_usuario(user):
+    """Devuelve la parte local del email como nombre amigable, con primera mayúscula."""
+    email = getattr(user, "email", "") or ""
+    local = email.split("@")[0] if "@" in email else email
+    # Si tiene puntos o guiones, capitalizamos cada parte
+    parts = [p.capitalize() for p in local.replace(".", " ").replace("-", " ").split()]
+    return " ".join(parts) if parts else "👋"
+
+def page_inicio(user):
+    nombre = _nombre_de_usuario(user)
+    page_header(f"Hola, {nombre}", "Tus finanzas desde un solo lugar.")
+
+    df = df_movimientos(user.id)
+
+    # ------------------------------------------------------------------------
+    # Estado del usuario: primera vez vs ya tiene datos
+    # ------------------------------------------------------------------------
+    if df.empty:
+        st.info(
+            "**Es tu primera vez por acá.** Para empezar:\n\n"
+            "1. Andá a **📝 Cargar movimiento** y registrá un ingreso, gasto o ahorro.\n"
+            "2. Si ya tenías plata antes de empezar a usar la app, abrí **📅 Flujo de Fondos** "
+            "y cargá tu saldo inicial de partida como un ajuste manual.\n"
+            "3. Ya con algunos movimientos cargados, mirá tu **📊 Dashboard** para ver "
+            "cómo te va mes a mes."
+        )
+    else:
+        n_movs = len(df)
+        ultimo_fecha = df["fecha_devengo"].max()
+        ultimo_fmt = ultimo_fecha.strftime("%d/%m/%Y")
+        primer_fecha = df["fecha_devengo"].min()
+        primer_fmt = primer_fecha.strftime("%m/%Y")
+
+        # KPIs livianos: cantidad de movimientos + último + saldo final actual
+        estado = calcular_estado_flujo(user.id)
+        saldo_actual = None
+        if estado and estado["meses_todos"]:
+            # Saldo final del último mes con datos
+            ultimo_mes_ts = estado["meses_todos"][-1]
+            saldo_actual = estado["saldos_fin"][ultimo_mes_ts]
+            ultimo_mes_lbl = ultimo_mes_ts.strftime("%m/%Y")
+        else:
+            ultimo_mes_lbl = None
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(metric_card("Movimientos cargados", str(n_movs)), unsafe_allow_html=True)
+        with col2:
+            st.markdown(metric_card("Último registrado", ultimo_fmt), unsafe_allow_html=True)
+        with col3:
+            if saldo_actual is not None:
+                color = "green" if saldo_actual >= 0 else "orange"
+                st.markdown(
+                    metric_card(f"Saldo al {ultimo_mes_lbl}", fmt_money(saldo_actual), color),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(metric_card("Saldo", "—"), unsafe_allow_html=True)
+
+        st.caption(
+            f"Llevás registro desde {primer_fmt}. Para ver el detalle, "
+            f"andá al **📊 Dashboard** o al **📅 Flujo de Fondos**."
+        )
+
+    st.divider()
+
+    # ------------------------------------------------------------------------
+    # Guía rápida de pestañas
+    # ------------------------------------------------------------------------
+    st.markdown("##### ¿Qué hace cada pestaña?")
+    st.markdown(
+        "- **🏠 Inicio**: esta pantalla, con tu resumen y la guía.\n"
+        "- **📊 Dashboard**: vista ejecutiva del mes con KPIs y gráficos.\n"
+        "- **📝 Cargar movimiento**: registrar un nuevo ingreso, gasto o ahorro (con cuotas si corresponde).\n"
+        "- **📋 Ver movimientos**: lista de todo lo cargado, con opción de editar o eliminar.\n"
+        "- **📈 Estado de Resultados**: cuánto ganaste y gastaste cada mes según *cuándo ocurrió*.\n"
+        "- **📅 Flujo de Fondos**: cómo entra y sale la plata mes a mes según *cuándo se paga*. "
+        "Acá también cargás tu saldo inicial.\n"
+        "- **⚙️ Configuración**: gestionar tus categorías (agregar, renombrar, desactivar)."
+    )
+
+    st.divider()
+
+    # ------------------------------------------------------------------------
+    # Aclaración devengado vs caja (resuelve dudas conceptuales del item 12)
+    # ------------------------------------------------------------------------
+    with st.expander("📚 ¿Cuál es la diferencia entre Estado de Resultados y Flujo de Fondos?"):
+        st.markdown(
+            "**Estado de Resultados (criterio devengado)**\n\n"
+            "Mira el mes en el que ocurrió el hecho económico, sin importar cuándo lo pagaste.\n"
+            "Si comprás algo en 12 cuotas en mayo, el gasto entero aparece en mayo.\n"
+            "Útil para responder: *¿qué tan bien me fue este mes, en términos económicos?*\n\n"
+            "**Flujo de Fondos (criterio caja)**\n\n"
+            "Mira el mes en el que efectivamente entró o salió la plata.\n"
+            "Si comprás algo en 12 cuotas en mayo, cada cuota aparece en su mes correspondiente.\n"
+            "Útil para responder: *¿cuánta plata tengo / voy a tener en cada mes?*\n\n"
+            "Los dos criterios son útiles. El primero te dice si gastás más de lo que ganás; "
+            "el segundo te dice si te vas a quedar sin plata en algún mes."
+        )
+
+# ============================================================================
+# PANTALLA: DASHBOARD
+# ============================================================================
+def page_dashboard(user):
+    page_header("Dashboard", "Vista rápida de tu situación financiera.")
+
+    estado = calcular_estado_flujo(user.id)
+    if estado is None:
+        st.info(
+            "No tenés movimientos cargados todavía. "
+            "Empezá desde **📝 Cargar movimiento**."
+        )
+        return
+
+    pivot_completo = estado["pivot_completo"]
+    flujo_neto = estado["flujo_neto"]
+    meses_todos = estado["meses_todos"]
+    saldos_fin = estado["saldos_fin"]
+
+    # --- Selector de mes (default = último con datos) ---
+    meses_lbl = [m.strftime("%m/%Y") for m in meses_todos]
+    mes_idx = st.selectbox(
+        "Mes a analizar",
+        options=list(range(len(meses_lbl))),
+        format_func=lambda i: meses_lbl[i],
+        index=len(meses_lbl) - 1,
+        key="dash_mes_idx",
+    )
+    mes_sel = meses_todos[mes_idx]
+    mes_lbl_sel = meses_lbl[mes_idx]
+
+    # --- 4 KPIs del mes seleccionado (criterio caja) ---
+    def safe_get(pivot, tipo, mes):
+        if tipo in pivot.index and mes in pivot.columns:
+            return float(pivot.loc[tipo, mes])
+        return 0.0
+
+    ingresos_mes = safe_get(pivot_completo, "Ingreso", mes_sel)
+    gastos_mes = (safe_get(pivot_completo, "Gasto Fijo", mes_sel)
+                  + safe_get(pivot_completo, "Gasto Variable", mes_sel))
+    ahorro_mes = safe_get(pivot_completo, "Ahorro", mes_sel)
+    resultado_mes = float(flujo_neto.loc[mes_sel])
+    saldo_fin_mes = float(saldos_fin[mes_sel])
+
+    st.markdown(f"##### Mes: {mes_lbl_sel}")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(metric_card("Ingresos", fmt_money(ingresos_mes), "green"),
+                    unsafe_allow_html=True)
+    with col2:
+        st.markdown(metric_card("Gastos", fmt_money(gastos_mes), "orange"),
+                    unsafe_allow_html=True)
+    with col3:
+        st.markdown(metric_card("Ahorro", fmt_money(ahorro_mes), "cyan"),
+                    unsafe_allow_html=True)
+    with col4:
+        color_res = "green" if resultado_mes >= 0 else "orange"
+        st.markdown(metric_card("Resultado", fmt_money(resultado_mes), color_res),
+                    unsafe_allow_html=True)
+
+    st.caption(
+        f"Saldo final estimado a fin de {mes_lbl_sel}: **{fmt_money(saldo_fin_mes)}** "
+        f"(montos por criterio caja)."
+    )
+
+    st.divider()
+
+    # ------------------------------------------------------------------------
+    # GRÁFICO 1: Evolución del saldo final (últimos 12 meses incluyendo el seleccionado)
+    # ------------------------------------------------------------------------
+    st.markdown("##### 💰 Evolución del saldo final")
+    # Tomamos hasta 12 meses terminando en el mes seleccionado
+    start_idx = max(0, mes_idx - 11)
+    meses_chart = meses_todos[start_idx:mes_idx + 1]
+    saldos_chart = [saldos_fin[m] for m in meses_chart]
+
+    df_saldo = pd.DataFrame({
+        "Mes": [m.strftime("%m/%Y") for m in meses_chart],
+        "Saldo final": saldos_chart,
+    })
+    fig_saldo = go.Figure()
+    fig_saldo.add_trace(go.Scatter(
+        x=df_saldo["Mes"], y=df_saldo["Saldo final"],
+        mode="lines+markers",
+        line=dict(color=NAVY, width=3),
+        marker=dict(size=8, color=NAVY),
+        name="Saldo final",
+        fill="tozeroy",
+        fillcolor="rgba(16, 34, 80, 0.08)",
+    ))
+    fig_saldo = aplicar_tema_plotly(fig_saldo, height=320)
+    st.plotly_chart(fig_saldo, use_container_width=True, config={"displayModeBar": False})
+
+    # ------------------------------------------------------------------------
+    # GRÁFICO 2: Evolución mensual con selector de serie
+    # (resuelve el problema de escala: cuando elegís una sola serie se autoescala bien)
+    # ------------------------------------------------------------------------
+    st.markdown("##### 📈 Evolución mensual")
+    serie_sel = st.radio(
+        "Mostrar",
+        options=["Resultado", "Ingresos", "Gastos", "Ahorro", "Todo"],
+        horizontal=True,
+        index=0,
+        key="dash_serie",
+    )
+
+    # Misma ventana de meses que el gráfico de saldo
+    fig_evol = go.Figure()
+    x_lbls = [m.strftime("%m/%Y") for m in meses_chart]
+
+    def serie_de(tipo):
+        return [safe_get(pivot_completo, tipo, m) for m in meses_chart]
+
+    def serie_gastos():
+        return [safe_get(pivot_completo, "Gasto Fijo", m)
+                + safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
+
+    def serie_resultado():
+        return [float(flujo_neto.loc[m]) for m in meses_chart]
+
+    if serie_sel == "Resultado":
+        vals = serie_resultado()
+        colores = [GREEN if v >= 0 else ORANGE for v in vals]
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=vals, name="Resultado",
+                                  marker_color=colores, marker_line_width=0))
+    elif serie_sel == "Ingresos":
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ingreso"),
+                                  name="Ingresos", marker_color=GREEN, marker_line_width=0))
+    elif serie_sel == "Gastos":
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_gastos(),
+                                  name="Gastos", marker_color=ORANGE, marker_line_width=0))
+    elif serie_sel == "Ahorro":
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ahorro"),
+                                  name="Ahorro", marker_color=CYAN, marker_line_width=0))
+    else:  # Todo
+        for tipo, color in [("Ingreso", GREEN), ("Gasto Fijo", NAVY),
+                            ("Gasto Variable", ORANGE), ("Ahorro", CYAN)]:
+            fig_evol.add_trace(go.Scatter(
+                x=x_lbls, y=serie_de(tipo), name=tipo,
+                mode="lines+markers",
+                line=dict(color=color, width=2.5),
+                marker=dict(size=7, color=color),
+            ))
+
+    fig_evol = aplicar_tema_plotly(fig_evol, height=320)
+    if serie_sel == "Todo":
+        st.caption(
+            "Las series están en la misma escala — si los ingresos son mucho mayores que "
+            "los gastos individuales, estos se ven aplastados contra el cero. "
+            "Para análisis detallado, elegí una serie a la vez."
+        )
+    st.plotly_chart(fig_evol, use_container_width=True, config={"displayModeBar": False})
+
+    # ------------------------------------------------------------------------
+    # GRÁFICO 3: Torta de gastos del mes seleccionado (por categoría)
+    # ------------------------------------------------------------------------
+    st.markdown(f"##### 🥧 Gastos por categoría — {mes_lbl_sel}")
+    df_caja = estado["df_caja"]
+    df_gastos_mes = df_caja[
+        (df_caja["mes_pago"] == mes_sel)
+        & (df_caja["tipo"].isin(["Gasto Fijo", "Gasto Variable"]))
+    ].copy()
+
+    if df_gastos_mes.empty:
+        st.caption("No hay gastos cargados en este mes.")
+    else:
+        df_torta = (df_gastos_mes.groupby("categoria", as_index=False)["monto_cuota"].sum()
+                    .sort_values("monto_cuota", ascending=False))
+        paleta = [NAVY, CYAN, ORANGE, GREEN, GREY,
+                  NAVY_HOVER, "#3aa9c9", "#f08259", "#3fa85a", "#9aa0a6"]
+        fig_torta = px.pie(
+            df_torta, names="categoria", values="monto_cuota",
+            hole=0.55,
+            color_discrete_sequence=paleta,
+        )
+        fig_torta.update_traces(
+            textposition="outside",
+            textinfo="label+percent",
+            marker=dict(line=dict(color="white", width=2)),
+        )
+        fig_torta = aplicar_tema_plotly(fig_torta, height=380)
+        fig_torta.update_layout(showlegend=False)
+        st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
+
+# ============================================================================
 # APP PRINCIPAL (LOGUEADO)
 # ============================================================================
 def app(user):
@@ -1662,14 +1998,20 @@ def app(user):
         st.divider()
 
     page = st.sidebar.radio("Menú", [
+        "🏠 Inicio",
+        "📊 Dashboard",
         "📝 Cargar movimiento",
         "📋 Ver movimientos",
-        "📊 Estado de Resultados",
+        "📈 Estado de Resultados",
         "📅 Flujo de Fondos",
         "⚙️ Configuración",
     ], label_visibility="collapsed")
 
-    if "Cargar" in page:
+    if "Inicio" in page:
+        page_inicio(user)
+    elif "Dashboard" in page:
+        page_dashboard(user)
+    elif "Cargar" in page:
         page_cargar(user)
     elif "Ver" in page:
         page_ver(user)
