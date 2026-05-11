@@ -2,11 +2,18 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.4 — Tanda 2.1: Saldo inicial como AJUSTE ADITIVO (no override)
+- El monto en saldos_iniciales se interpreta como un DELTA sobre el cálculo automático.
+- Fórmula: Saldo inicial M = Saldo final M-1 + Ajuste manual M
+- Para el primer mes con datos: SF M-1 = 0, entonces el ajuste = saldo inicial de partida.
+- Para meses intermedios: el ajuste reconcilia discrepancias y se preserva en meses posteriores.
+- UI: el form muestra "automático + tu ajuste = saldo efectivo" en vivo.
+- Cargar ajuste = 0 borra el registro (vuelve al cálculo puro).
+- Fila opcional "Ajuste" en la pivot, solo si hay ajustes en el rango.
+
 Versión 3.3 — Tanda 2: Saldos iniciales por mes (persistentes y editables)
 - Tabla nueva en Supabase: saldos_iniciales (user_id, mes, monto)
 - Saldo inicial de cada mes se calcula encadenadamente desde el primero
-- Si hay ajuste manual para un mes, ese sobreescribe el cálculo
-- Flujo de Fondos: se agrega fila "Saldo inicial" al principio del pivot
 - Form para ajustar el saldo inicial de cualquier mes y persistirlo
 - Bug resuelto: el saldo inicial ya no se borra al cambiar de pestaña
 
@@ -632,8 +639,15 @@ def delete_movimiento(user_id, mov_id):
 @st.cache_data(ttl=30, show_spinner=False)
 def get_saldos_iniciales_manuales(user_id: str) -> dict:
     """
-    Retorna un dict {date(yyyy,mm,01): monto_float} con los ajustes manuales
-    del saldo inicial cargados por el usuario.
+    Retorna un dict {date(yyyy,mm,01): ajuste_float} con los ajustes manuales
+    cargados por el usuario.
+
+    SEMÁNTICA (v3.4):
+    El valor guardado es un DELTA (ajuste aditivo) sobre el saldo inicial calculado
+    automáticamente del mes anterior. Para el primer mes con datos, el saldo final
+    del mes anterior es 0, entonces el ajuste funciona como saldo de partida absoluto.
+
+    Fórmula completa: Saldo inicial M = Saldo final M-1 + ajustes.get(M, 0)
     """
     res = (
         sb.table("saldos_iniciales").select("mes, monto")
@@ -1292,25 +1306,30 @@ def page_flujo(user):
         - (pivot_completo.loc["Ahorro"] if "Ahorro" in pivot_completo.index else 0)
     )
 
-    # Ajustes manuales cargados por el usuario
+    # Ajustes manuales cargados por el usuario (delta sobre el cálculo automático)
     ajustes_manuales = get_saldos_iniciales_manuales(user.id)
 
-    # Recorremos meses en orden cronológico y encadenamos saldos
+    # Recorremos meses en orden cronológico y encadenamos saldos.
+    # Para cada mes:
+    #   saldo_automatico = saldo_final del mes anterior (o 0 si es el primero)
+    #   ajuste = ajustes_manuales.get(mes, 0)
+    #   saldo_inicial = saldo_automatico + ajuste
+    #   saldo_final = saldo_inicial + flujo_neto
     meses_todos = list(flujo_neto_completo.index)
-    saldos_ini = {}   # {Timestamp -> float}
-    saldos_fin = {}   # {Timestamp -> float}
-    es_manual = {}    # {Timestamp -> bool}
+    saldo_auto = {}   # {Timestamp -> float}  saldo inicial sin ajuste
+    ajuste = {}       # {Timestamp -> float}  delta cargado (0 si no hay)
+    saldos_ini = {}   # {Timestamp -> float}  saldo inicial efectivo (auto + ajuste)
+    saldos_fin = {}   # {Timestamp -> float}  saldo final del mes
 
-    saldo_anterior = None  # saldo final del mes previo
+    saldo_anterior = 0.0  # saldo final del mes previo
     for mes_ts in meses_todos:
         mes_d = mes_ts.date().replace(day=1) if hasattr(mes_ts, "date") else mes_ts
-        if mes_d in ajustes_manuales:
-            si = ajustes_manuales[mes_d]
-            es_manual[mes_ts] = True
-        else:
-            si = saldo_anterior if saldo_anterior is not None else 0.0
-            es_manual[mes_ts] = False
+        auto = saldo_anterior
+        aj = float(ajustes_manuales.get(mes_d, 0.0))
+        si = auto + aj
         sf = si + float(flujo_neto_completo.loc[mes_ts])
+        saldo_auto[mes_ts] = auto
+        ajuste[mes_ts] = aj
         saldos_ini[mes_ts] = si
         saldos_fin[mes_ts] = sf
         saldo_anterior = sf
@@ -1327,13 +1346,21 @@ def page_flujo(user):
     pivot_rango = pivot_completo.loc[:, meses_rango].copy()
 
     # ------------------------------------------------------------------------
-    # Armar tabla final: Saldo inicial al principio, Flujo neto y Saldo final al final
+    # Armar tabla final
+    # Filas: Saldo inicial → [Ajuste si hay alguno en rango] → tipos → Flujo neto → Saldo final
     # ------------------------------------------------------------------------
-    filas_ordenadas = ["Saldo inicial"] + list(pivot_rango.index) + ["Flujo neto", "Saldo final"]
+    hay_ajustes_en_rango = any(ajuste[m] != 0.0 for m in meses_rango)
+    filas_ordenadas = ["Saldo inicial"]
+    if hay_ajustes_en_rango:
+        filas_ordenadas.append("Ajuste")
+    filas_ordenadas += list(pivot_rango.index) + ["Flujo neto", "Saldo final"]
+
     pivot_final = pd.DataFrame(index=filas_ordenadas, columns=pivot_rango.columns, dtype=float)
 
     for m in meses_rango:
         pivot_final.loc["Saldo inicial", m] = saldos_ini[m]
+        if hay_ajustes_en_rango:
+            pivot_final.loc["Ajuste", m] = ajuste[m]
         for tipo in pivot_rango.index:
             pivot_final.loc[tipo, m] = pivot_rango.loc[tipo, m]
         pivot_final.loc["Flujo neto", m] = float(flujo_neto_completo.loc[m])
@@ -1344,7 +1371,7 @@ def page_flujo(user):
     pivot_fmt.index.name = "Concepto"
     st.dataframe(pivot_fmt, use_container_width=True)
 
-    # Aviso si el primer mes con datos no tiene saldo inicial manual y arrancó en 0
+    # Aviso si el primer mes con datos no tiene ajuste cargado (arranca en $0)
     primer_mes_global = meses_todos[0]
     primer_mes_global_d = (primer_mes_global.date().replace(day=1)
                            if hasattr(primer_mes_global, "date") else primer_mes_global)
@@ -1352,93 +1379,87 @@ def page_flujo(user):
         primer_lbl = primer_mes_global.strftime("%m/%Y")
         st.caption(
             f"⚠ El primer mes con movimientos ({primer_lbl}) arranca con saldo inicial $0,00. "
-            f"Si tenías plata antes de empezar a usar la app, ajustá su saldo inicial abajo."
+            f"Si tenías plata antes de empezar a usar la app, cargá el saldo de partida como un "
+            f"ajuste manual abajo (el ajuste para el primer mes funciona como saldo absoluto)."
         )
-
-    # Lista de ajustes manuales activos dentro del rango visible
-    manuales_en_rango = [(m, saldos_ini[m]) for m in meses_rango if es_manual[m]]
-    if manuales_en_rango:
-        lineas = "  \n".join(
-            [f"- **{m.strftime('%m/%Y')}**: {fmt_money(v)}" for m, v in manuales_en_rango]
-        )
-        st.caption("✏ Meses con ajuste manual (los manuales sobreescriben el cálculo):  \n" + lineas)
 
     # ------------------------------------------------------------------------
-    # FORM: ajustar saldo inicial de un mes
+    # AJUSTAR saldo inicial de un mes (widgets sueltos para preview en vivo)
     # ------------------------------------------------------------------------
     st.divider()
     st.markdown("##### ✏ Ajustar saldo inicial")
     st.caption(
-        "El saldo inicial de cada mes se calcula automáticamente como el saldo final "
-        "del mes anterior. Si necesitás reconciliar diferencias o fijar el saldo del "
-        "primer mes, cargá un ajuste manual acá. Los ajustes manuales sobreescriben el cálculo."
+        "El ajuste se SUMA al saldo inicial calculado automáticamente. "
+        "Sirve para reconciliar discrepancias (si el saldo real es distinto al calculado) "
+        "y se preserva en los meses siguientes. Para el primer mes con movimientos, "
+        "el ajuste funciona como saldo de partida absoluto. Cargá 0 y guardá para borrarlo."
     )
 
     meses_opts_lbl = [m.strftime("%m/%Y") for m in meses_rango]
     meses_opts_ts = list(meses_rango)
 
-    with st.form("ajustar_saldo", clear_on_submit=False):
-        col1, col2, col3 = st.columns([2, 2, 1])
-        with col1:
-            mes_idx = st.selectbox(
-                "Mes",
-                options=list(range(len(meses_opts_lbl))),
-                format_func=lambda i: meses_opts_lbl[i],
-                index=0,
-                key="aj_mes_idx",
-            )
-        mes_ts_sel = meses_opts_ts[mes_idx]
-        valor_actual = float(saldos_ini[mes_ts_sel])
-        es_manual_sel = es_manual[mes_ts_sel]
-        with col2:
-            monto_aj = st.number_input(
-                "Saldo inicial",
-                value=valor_actual,
-                step=10000.0,
-                format="%.2f",
-                key="aj_monto",
-            )
-        with col3:
-            st.markdown('<div style="height:28px;"></div>', unsafe_allow_html=True)
-            ok_aj = st.form_submit_button("💾 Guardar", use_container_width=True)
+    col_mes, col_aj = st.columns([1, 2])
+    with col_mes:
+        mes_idx = st.selectbox(
+            "Mes",
+            options=list(range(len(meses_opts_lbl))),
+            format_func=lambda i: meses_opts_lbl[i],
+            index=0,
+            key="aj_mes_idx",
+        )
+    mes_ts_sel = meses_opts_ts[mes_idx]
+    mes_lbl_sel = meses_opts_lbl[mes_idx]
+    auto_sel = float(saldo_auto[mes_ts_sel])
+    ajuste_actual = float(ajuste[mes_ts_sel])
 
-        origen = "manual" if es_manual_sel else "calculado"
-        st.caption(
-            f"Valor actual de {meses_opts_lbl[mes_idx]}: **{fmt_money(valor_actual)}** ({origen})."
+    with col_aj:
+        # Key dinámica por mes: al cambiar el selector, el input se "resetea" al ajuste de ese mes.
+        ajuste_input = st.number_input(
+            "Tu ajuste manual (positivo o negativo)",
+            value=ajuste_actual,
+            step=10000.0,
+            format="%.2f",
+            key=f"aj_input_{mes_ts_sel.isoformat()}",
         )
 
-        if ok_aj:
-            try:
-                upsert_saldo_inicial(user.id, mes_ts_sel.date(), monto_aj)
+    ajuste_efectivo = float(ajuste_input or 0.0)
+    saldo_efectivo = auto_sel + ajuste_efectivo
+
+    # Preview en vivo: el usuario ve qué pasa antes de guardar
+    st.markdown(
+        f"<div style='background: var(--bg-soft); border: 1px solid var(--border); "
+        f"border-radius: 8px; padding: 12px 16px; margin: 8px 0;'>"
+        f"<div style='color: var(--text-muted); font-size: 0.85rem;'>Vista previa para {mes_lbl_sel}:</div>"
+        f"<div style='font-family: \"Poppins\", sans-serif; color: var(--navy); margin-top: 4px;'>"
+        f"{fmt_money(auto_sel)} <span style='color: var(--text-muted);'>(automático)</span> "
+        f"+ {fmt_money(ajuste_efectivo)} <span style='color: var(--text-muted);'>(ajuste)</span> = "
+        f"<strong>{fmt_money(saldo_efectivo)}</strong> "
+        f"<span style='color: var(--text-muted);'>(saldo inicial efectivo)</span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.button("💾 Guardar ajuste", use_container_width=False, key="btn_guardar_aj"):
+        try:
+            if ajuste_efectivo == 0.0:
+                # Si el usuario puso 0, borramos el registro (si existía)
+                if mes_ts_sel.date().replace(day=1) in ajustes_manuales:
+                    delete_saldo_inicial(user.id, mes_ts_sel.date())
+                    st.success(f"✅ Ajuste de {mes_lbl_sel} eliminado. Vuelve al cálculo automático.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.info("No hay nada que guardar (ajuste = 0 y no había registro previo).")
+            else:
+                upsert_saldo_inicial(user.id, mes_ts_sel.date(), ajuste_efectivo)
                 st.success(
-                    f"✅ Saldo inicial de {meses_opts_lbl[mes_idx]} guardado: {fmt_money(monto_aj)}"
+                    f"✅ Ajuste de {fmt_money(ajuste_efectivo)} guardado para {mes_lbl_sel}. "
+                    f"Saldo inicial efectivo: {fmt_money(saldo_efectivo)}."
                 )
                 st.cache_data.clear()
                 st.rerun()
-            except Exception as e:
-                st.error(f"Error al guardar: {e}")
-
-    # ------------------------------------------------------------------------
-    # Quitar ajuste manual (volver al cálculo automático)
-    # ------------------------------------------------------------------------
-    if manuales_en_rango:
-        with st.expander("Quitar ajuste manual (volver al cálculo automático)"):
-            opts_quitar = [m.strftime("%m/%Y") for m, _ in manuales_en_rango]
-            mes_quitar_idx = st.selectbox(
-                "Mes a quitar",
-                options=list(range(len(opts_quitar))),
-                format_func=lambda i: opts_quitar[i],
-                key="quitar_mes_idx",
-            )
-            if st.button("🗑 Quitar ajuste", key="btn_quitar_aj"):
-                mes_ts_q = manuales_en_rango[mes_quitar_idx][0]
-                try:
-                    delete_saldo_inicial(user.id, mes_ts_q.date())
-                    st.success(f"Ajuste manual de {opts_quitar[mes_quitar_idx]} eliminado")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+        except Exception as e:
+            st.error(f"Error al guardar: {e}")
 
     # ------------------------------------------------------------------------
     # Detalle de cuotas por mes (igual que antes)
