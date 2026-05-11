@@ -2,6 +2,15 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.6 — Ajustes finos sobre Tanda 3
+- "plata" → "dinero" en toda la app
+- Estado de Resultados: removidos los gráficos de evolución mensual y torta
+  por categoría (ahora viven en Dashboard, una sola fuente de verdad)
+- Inicio: "Saldo actual" usa el mes en curso (no el último con datos), para
+  no mostrar saldos proyectados de meses futuros como si fueran "actuales"
+- Dashboard: gráfico de torta rediseñado con filtros propios (selector de mes
+  con opción "Todos" y selector de tipo: Todos / Gasto Fijo / Gasto Variable / Ahorro)
+
 Versión 3.5 — Tanda 3: Pestañas Inicio y Dashboard
 - Pestaña "🏠 Inicio" como default al loguearse: bienvenida, resumen rápido,
   guía de pestañas y aclaración corta de devengado vs caja.
@@ -1246,73 +1255,17 @@ def page_resultados(user):
         - (pivot.loc["Ahorro"] if "Ahorro" in pivot.index else 0)
     )
 
-    pivot_meses = pivot.copy()
     pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
     pivot_fmt = pivot.copy().map(fmt_money)
     pivot_fmt.index.name = "Concepto"
     st.dataframe(pivot_fmt, use_container_width=True)
 
-    st.markdown("##### 📈 Evolución mensual")
-    df_evol_rows = []
-    for tipo in orden:
-        if tipo in pivot_meses.index:
-            for mes, val in pivot_meses.loc[tipo].items():
-                df_evol_rows.append({"Mes": mes, "Tipo": tipo, "Monto": float(val)})
-    df_evol = pd.DataFrame(df_evol_rows)
-    if not df_evol.empty:
-        fig_evol = px.line(
-            df_evol, x="Mes", y="Monto", color="Tipo",
-            markers=True,
-            color_discrete_map=COLOR_TIPO,
-        )
-        fig_evol.update_traces(line=dict(width=2.5), marker=dict(size=7))
-        fig_evol = aplicar_tema_plotly(fig_evol, height=320)
-        fig_evol.update_xaxes(tickformat="%m/%Y")
-        st.plotly_chart(fig_evol, use_container_width=True,
-                        config={"displayModeBar": False})
-
-    st.markdown("##### 🥧 Gastos por categoría")
-    meses_disp = sorted(df["mes"].unique(), reverse=True)
-    col_a, col_b = st.columns([3, 1])
-    with col_a:
-        mes_torta = st.selectbox(
-            "Mes",
-            options=["Todo el rango"] + [pd.Timestamp(d).strftime("%m/%Y") for d in meses_disp],
-            key="mes_torta_er",
-        )
-    with col_b:
-        tipo_gasto = st.selectbox("Tipo", ["Ambos", "Gasto Fijo", "Gasto Variable"],
-                                  key="tipo_torta")
-
-    df_gastos = df[df["tipo"].isin(["Gasto Fijo", "Gasto Variable"])].copy()
-    if tipo_gasto != "Ambos":
-        df_gastos = df_gastos[df_gastos["tipo"] == tipo_gasto]
-    if mes_torta != "Todo el rango":
-        df_gastos = df_gastos[df_gastos["mes"].dt.strftime("%m/%Y") == mes_torta]
-
-    if df_gastos.empty:
-        st.caption("No hay gastos en la selección.")
-    else:
-        df_torta = df_gastos.groupby("categoria", as_index=False)["monto_total"].sum()
-        df_torta = df_torta.sort_values("monto_total", ascending=False)
-        paleta_torta = [NAVY, CYAN, ORANGE, GREEN, GREY,
-                        NAVY_HOVER, "#3aa9c9", "#f08259", "#3fa85a", "#9aa0a6"]
-        fig_torta = px.pie(
-            df_torta, names="categoria", values="monto_total",
-            hole=0.55,
-            color_discrete_sequence=paleta_torta,
-        )
-        fig_torta.update_traces(
-            textposition="outside",
-            textinfo="label+percent",
-            marker=dict(line=dict(color="white", width=2)),
-        )
-        fig_torta = aplicar_tema_plotly(fig_torta, height=380)
-        fig_torta.update_layout(showlegend=False)
-        st.plotly_chart(fig_torta, use_container_width=True,
-                        config={"displayModeBar": False})
+    st.caption(
+        "Los gráficos de evolución mensual y de gastos por categoría viven en **📊 Dashboard**."
+    )
 
     st.markdown("##### Detalle por categoría")
+    meses_disp = sorted(df["mes"].unique(), reverse=True)
     mes_sel = st.selectbox(
         "Seleccionar mes",
         options=meses_disp,
@@ -1428,7 +1381,7 @@ def page_flujo(user):
         primer_lbl = primer_mes_global.strftime("%m/%Y")
         st.caption(
             f"⚠ El primer mes con movimientos ({primer_lbl}) arranca con saldo inicial $0,00. "
-            f"Si tenías plata antes de empezar a usar la app, cargá el saldo de partida como un "
+            f"Si tenías dinero antes de empezar a usar la app, cargá el saldo de partida como un "
             f"ajuste manual abajo (el ajuste para el primer mes funciona como saldo absoluto)."
         )
 
@@ -1711,7 +1664,7 @@ def page_inicio(user):
         st.info(
             "**Es tu primera vez por acá.** Para empezar:\n\n"
             "1. Andá a **📝 Cargar movimiento** y registrá un ingreso, gasto o ahorro.\n"
-            "2. Si ya tenías plata antes de empezar a usar la app, abrí **📅 Flujo de Fondos** "
+            "2. Si ya tenías dinero antes de empezar a usar la app, abrí **📅 Flujo de Fondos** "
             "y cargá tu saldo inicial de partida como un ajuste manual.\n"
             "3. Ya con algunos movimientos cargados, mirá tu **📊 Dashboard** para ver "
             "cómo te va mes a mes."
@@ -1723,16 +1676,25 @@ def page_inicio(user):
         primer_fecha = df["fecha_devengo"].min()
         primer_fmt = primer_fecha.strftime("%m/%Y")
 
-        # KPIs livianos: cantidad de movimientos + último + saldo final actual
+        # KPIs livianos: saldo a fin del mes en curso (no del último mes con datos,
+        # porque podría ser un mes futuro si hay cuotas proyectadas adelante).
         estado = calcular_estado_flujo(user.id)
         saldo_actual = None
+        hoy = date.today()
+        mes_curso_d = date(hoy.year, hoy.month, 1)
+        mes_curso_lbl = mes_curso_d.strftime("%m/%Y")
+
         if estado and estado["meses_todos"]:
-            # Saldo final del último mes con datos
-            ultimo_mes_ts = estado["meses_todos"][-1]
-            saldo_actual = estado["saldos_fin"][ultimo_mes_ts]
-            ultimo_mes_lbl = ultimo_mes_ts.strftime("%m/%Y")
-        else:
-            ultimo_mes_lbl = None
+            # Buscar el mes con datos más reciente que NO sea posterior al mes en curso
+            mes_relevante = None
+            for m_ts in estado["meses_todos"]:
+                m_d = m_ts.date().replace(day=1) if hasattr(m_ts, "date") else m_ts
+                if m_d <= mes_curso_d:
+                    mes_relevante = m_ts
+                else:
+                    break  # los meses están ordenados ascendentemente
+            if mes_relevante is not None:
+                saldo_actual = estado["saldos_fin"][mes_relevante]
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1743,11 +1705,14 @@ def page_inicio(user):
             if saldo_actual is not None:
                 color = "green" if saldo_actual >= 0 else "orange"
                 st.markdown(
-                    metric_card(f"Saldo al {ultimo_mes_lbl}", fmt_money(saldo_actual), color),
+                    metric_card(f"Saldo a fin de {mes_curso_lbl}", fmt_money(saldo_actual), color),
                     unsafe_allow_html=True,
                 )
             else:
-                st.markdown(metric_card("Saldo", "—"), unsafe_allow_html=True)
+                st.markdown(
+                    metric_card(f"Saldo a fin de {mes_curso_lbl}", "—"),
+                    unsafe_allow_html=True,
+                )
 
         st.caption(
             f"Llevás registro desde {primer_fmt}. Para ver el detalle, "
@@ -1766,7 +1731,7 @@ def page_inicio(user):
         "- **📝 Cargar movimiento**: registrar un nuevo ingreso, gasto o ahorro (con cuotas si corresponde).\n"
         "- **📋 Ver movimientos**: lista de todo lo cargado, con opción de editar o eliminar.\n"
         "- **📈 Estado de Resultados**: cuánto ganaste y gastaste cada mes según *cuándo ocurrió*.\n"
-        "- **📅 Flujo de Fondos**: cómo entra y sale la plata mes a mes según *cuándo se paga*. "
+        "- **📅 Flujo de Fondos**: cómo entra y sale el dinero mes a mes según *cuándo se paga*. "
         "Acá también cargás tu saldo inicial.\n"
         "- **⚙️ Configuración**: gestionar tus categorías (agregar, renombrar, desactivar)."
     )
@@ -1783,11 +1748,11 @@ def page_inicio(user):
             "Si comprás algo en 12 cuotas en mayo, el gasto entero aparece en mayo.\n"
             "Útil para responder: *¿qué tan bien me fue este mes, en términos económicos?*\n\n"
             "**Flujo de Fondos (criterio caja)**\n\n"
-            "Mira el mes en el que efectivamente entró o salió la plata.\n"
+            "Mira el mes en el que efectivamente entró o salió el dinero.\n"
             "Si comprás algo en 12 cuotas en mayo, cada cuota aparece en su mes correspondiente.\n"
-            "Útil para responder: *¿cuánta plata tengo / voy a tener en cada mes?*\n\n"
+            "Útil para responder: *¿cuánto dinero tengo / voy a tener en cada mes?*\n\n"
             "Los dos criterios son útiles. El primero te dice si gastás más de lo que ganás; "
-            "el segundo te dice si te vas a quedar sin plata en algún mes."
+            "el segundo te dice si te vas a quedar sin dinero en algún mes."
         )
 
 # ============================================================================
@@ -1944,20 +1909,50 @@ def page_dashboard(user):
     st.plotly_chart(fig_evol, use_container_width=True, config={"displayModeBar": False})
 
     # ------------------------------------------------------------------------
-    # GRÁFICO 3: Torta de gastos del mes seleccionado (por categoría)
+    # GRÁFICO 3: Composición por categoría (gastos + ahorro) con filtros propios
     # ------------------------------------------------------------------------
-    st.markdown(f"##### 🥧 Gastos por categoría — {mes_lbl_sel}")
-    df_caja = estado["df_caja"]
-    df_gastos_mes = df_caja[
-        (df_caja["mes_pago"] == mes_sel)
-        & (df_caja["tipo"].isin(["Gasto Fijo", "Gasto Variable"]))
-    ].copy()
+    st.markdown("##### 🥧 Composición por categoría")
 
-    if df_gastos_mes.empty:
-        st.caption("No hay gastos cargados en este mes.")
+    # Selectores propios para este gráfico (independientes del selector principal)
+    col_t1, col_t2 = st.columns([3, 2])
+    with col_t1:
+        # Default = mes principal del Dashboard; opción extra "Todos los meses"
+        meses_lbl_torta = ["Todos los meses"] + meses_lbl
+        idx_default = meses_lbl_torta.index(mes_lbl_sel) if mes_lbl_sel in meses_lbl_torta else 1
+        mes_torta_sel = st.selectbox(
+            "Mes",
+            options=meses_lbl_torta,
+            index=idx_default,
+            key="dash_torta_mes",
+        )
+    with col_t2:
+        tipo_torta_sel = st.selectbox(
+            "Tipo",
+            options=["Todos", "Gasto Fijo", "Gasto Variable", "Ahorro"],
+            index=0,
+            key="dash_torta_tipo",
+        )
+
+    df_caja = estado["df_caja"]
+
+    # Filtrar por tipo
+    if tipo_torta_sel == "Todos":
+        df_torta_base = df_caja[df_caja["tipo"].isin(["Gasto Fijo", "Gasto Variable", "Ahorro"])].copy()
     else:
-        df_torta = (df_gastos_mes.groupby("categoria", as_index=False)["monto_cuota"].sum()
+        df_torta_base = df_caja[df_caja["tipo"] == tipo_torta_sel].copy()
+
+    # Filtrar por mes
+    if mes_torta_sel != "Todos los meses":
+        df_torta_base = df_torta_base[
+            df_torta_base["mes_pago"].dt.strftime("%m/%Y") == mes_torta_sel
+        ]
+
+    if df_torta_base.empty:
+        st.caption("No hay datos en la selección.")
+    else:
+        df_torta = (df_torta_base.groupby("categoria", as_index=False)["monto_cuota"].sum()
                     .sort_values("monto_cuota", ascending=False))
+        total_torta = df_torta["monto_cuota"].sum()
         paleta = [NAVY, CYAN, ORANGE, GREEN, GREY,
                   NAVY_HOVER, "#3aa9c9", "#f08259", "#3fa85a", "#9aa0a6"]
         fig_torta = px.pie(
@@ -1973,6 +1968,11 @@ def page_dashboard(user):
         fig_torta = aplicar_tema_plotly(fig_torta, height=380)
         fig_torta.update_layout(showlegend=False)
         st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
+        st.caption(
+            f"Total {tipo_torta_sel.lower() if tipo_torta_sel != 'Todos' else 'gastos + ahorro'} "
+            f"en {mes_torta_sel.lower() if mes_torta_sel != 'Todos los meses' else 'todos los meses'}: "
+            f"**{fmt_money(total_torta)}**"
+        )
 
 # ============================================================================
 # APP PRINCIPAL (LOGUEADO)
