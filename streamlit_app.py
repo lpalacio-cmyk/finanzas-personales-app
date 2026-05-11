@@ -2,6 +2,14 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.2 — Tanda 1 de mejoras UX:
+- Formato monetario es-AR ($77.569,90 con punto miles y coma decimal)
+- Separadores es-AR aplicados también a tooltips y axis de Plotly
+- "Fecha devengo" → "Fecha del movimiento" en formularios
+- Inputs de monto vacíos por default (placeholder "0,00") en lugar de "0.00" preescrito
+- En Flujo de Fondos: "Flujo neto del mes" → "Flujo neto", "Saldo acumulado" → "Saldo final"
+- Eliminado el gráfico de "Flujo neto y saldo acumulado"
+
 Versión 3.1 — Rebranding:
 - Identidad visual WL HNOS & ASOC (logo, tipografía Open Sans + Poppins, paleta del manual de marca)
 - Login rediseñado con card central
@@ -613,9 +621,23 @@ def delete_movimiento(user_id, mov_id):
 # ============================================================================
 # HELPERS
 # ============================================================================
-def fmt_money(n):
+def fmt_money(n, decimals: int = 2):
+    """
+    Formato monetario es-AR: $77.569,90 / -$5.500,25
+    - Punto como separador de miles
+    - Coma como separador decimal
+    - Signo negativo antes del símbolo $
+    - Por defecto 2 decimales; pasar decimals=0 para enteros redondeados.
+    """
     try:
-        return f"${n:,.0f}".replace(",", ".")
+        if n is None or (isinstance(n, float) and pd.isna(n)):
+            return "—"
+        v = float(n)
+        signo = "-" if v < 0 else ""
+        # Truco de intercambio: formato US primero, luego swap.
+        s = f"{abs(v):,.{decimals}f}"             # '77,569.90'
+        s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{signo}${s}"
     except Exception:
         return str(n)
 
@@ -700,6 +722,8 @@ def metric_card(label: str, value: str, color: str = ""):
 
 def aplicar_tema_plotly(fig: go.Figure, height: int = 320):
     fig.update_layout(
+        # es-AR: primer carácter = decimal, segundo = miles -> "1.000.000,00"
+        separators=",.",
         font=dict(family="Open Sans, sans-serif", color=NAVY, size=12),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -721,6 +745,8 @@ def aplicar_tema_plotly(fig: go.Figure, height: int = 320):
         gridcolor=BORDER,
         linecolor=BORDER,
         tickfont=dict(size=11, color=TEXT_MUTED),
+        # Forzar número completo (sin 1k/1M/1G); junto con separators=",." -> "1.000.000"
+        tickformat=",",
     )
     return fig
 
@@ -807,7 +833,7 @@ def page_cargar(user):
     with st.form("nuevo_mov", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
-            fecha_devengo = st.date_input("Fecha devengo", value=date.today(),
+            fecha_devengo = st.date_input("Fecha del movimiento", value=date.today(),
                                           format="DD/MM/YYYY")
         with col2:
             if not cats:
@@ -818,7 +844,7 @@ def page_cargar(user):
 
         concepto = st.text_input("Concepto / Nota", placeholder="Ej: Período 05/26")
         monto = st.number_input("Monto total", min_value=0.0, step=1000.0,
-                                format="%.2f", value=0.0)
+                                format="%.2f", value=None, placeholder="0,00")
 
         col3, col4 = st.columns(2)
         with col3:
@@ -827,7 +853,7 @@ def page_cargar(user):
             inicio_pago = st.date_input("Inicio pago", value=date.today(),
                                         format="DD/MM/YYYY")
 
-        if cuotas > 1 and monto > 0:
+        if cuotas > 1 and monto and monto > 0:
             cuota_mensual = monto / cuotas
             st.info(
                 f"📊 **Estado de Resultados**: {fmt_money(monto)} en {fecha_devengo.strftime('%m/%Y')} (devengado).\n\n"
@@ -838,7 +864,7 @@ def page_cargar(user):
         if ok:
             if not categoria:
                 st.error("Elegí una categoría")
-            elif monto <= 0:
+            elif not monto or monto <= 0:
                 st.error("El monto debe ser mayor a cero")
             else:
                 try:
@@ -908,11 +934,12 @@ def page_ver(user):
     st.write("")
 
     df_view = df.copy()
-    df_view["Devengo"] = df_view["fecha_devengo"].dt.strftime("%d/%m/%Y")
+    df_view["Fecha"] = df_view["fecha_devengo"].dt.strftime("%d/%m/%Y")
     df_view["Inicio pago"] = df_view["inicio_pago"].dt.strftime("%d/%m/%Y")
-    df_view = df_view[["Devengo", "tipo", "categoria", "concepto",
-                       "monto_total", "cuotas", "Inicio pago"]]
-    df_view.columns = ["Devengo", "Tipo", "Categoría", "Concepto",
+    df_view["Monto"] = df_view["monto_total"].apply(fmt_money)
+    df_view = df_view[["Fecha", "tipo", "categoria", "concepto",
+                       "Monto", "cuotas", "Inicio pago"]]
+    df_view.columns = ["Fecha", "Tipo", "Categoría", "Concepto",
                        "Monto", "Cuotas", "Inicio pago"]
     st.dataframe(df_view, hide_index=True, use_container_width=True)
 
@@ -952,7 +979,7 @@ def page_ver(user):
 
         col1, col2 = st.columns(2)
         with col1:
-            fecha_e = st.date_input("Fecha devengo",
+            fecha_e = st.date_input("Fecha del movimiento",
                                     value=pd.to_datetime(mov["fecha_devengo"]).date(),
                                     format="DD/MM/YYYY", key=f"e_fdev_{mov_id}")
         with col2:
@@ -1020,7 +1047,7 @@ def page_ver(user):
 # ============================================================================
 def page_resultados(user):
     page_header("Estado de Resultados",
-                "Criterio devengado · Agrupado por mes de la fecha de devengo.")
+                "Criterio devengado · Agrupado por el mes de la fecha del movimiento.")
 
     df = df_movimientos(user.id)
     if df.empty:
@@ -1029,7 +1056,7 @@ def page_resultados(user):
 
     desde_def, hasta_def = rango_fechas_default(df, "fecha_devengo")
     fechas = st.date_input(
-        "Rango de fechas (devengo)",
+        "Rango de fechas",
         value=(desde_def, hasta_def),
         format="DD/MM/YYYY",
         key="rango_er",
@@ -1187,8 +1214,10 @@ def page_flujo(user):
             key="rango_ff",
         )
     with col2:
-        saldo_inicial = st.number_input("Saldo inicial", value=0.0,
-                                        step=10000.0, format="%.2f")
+        saldo_inicial = st.number_input("Saldo inicial", value=None,
+                                        step=10000.0, format="%.2f",
+                                        placeholder="0,00")
+    saldo_inicial = saldo_inicial or 0.0
 
     if isinstance(fechas, tuple) and len(fechas) == 2:
         desde, hasta = fechas
@@ -1217,52 +1246,19 @@ def page_flujo(user):
         - (pivot.loc["Gasto Variable"] if "Gasto Variable" in pivot.index else 0)
         - (pivot.loc["Ahorro"] if "Ahorro" in pivot.index else 0)
     )
-    pivot.loc["Flujo neto del mes"] = flujo_neto
+    pivot.loc["Flujo neto"] = flujo_neto
 
     saldo_final = []
     saldo = saldo_inicial
     for v in flujo_neto:
         saldo += v
         saldo_final.append(saldo)
-    pivot.loc["Saldo acumulado"] = saldo_final
+    pivot.loc["Saldo final"] = saldo_final
 
-    pivot_meses = pivot.copy()
     pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
     pivot_fmt = pivot.copy().map(fmt_money)
     pivot_fmt.index.name = "Concepto"
     st.dataframe(pivot_fmt, use_container_width=True)
-
-    st.markdown("##### 📊 Flujo neto y saldo acumulado")
-    meses_lbl = [c.strftime("%m/%Y") for c in pivot_meses.columns]
-    df_chart = pd.DataFrame({
-        "Mes": meses_lbl,
-        "Flujo neto": list(pivot_meses.loc["Flujo neto del mes"].values),
-        "Saldo acumulado": list(pivot_meses.loc["Saldo acumulado"].values),
-    })
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=df_chart["Mes"], y=df_chart["Flujo neto"],
-        name="Flujo neto",
-        marker_color=[GREEN if v >= 0 else ORANGE for v in df_chart["Flujo neto"]],
-        marker_line_width=0,
-    ))
-    fig.add_trace(go.Scatter(
-        x=df_chart["Mes"], y=df_chart["Saldo acumulado"],
-        name="Saldo acumulado", mode="lines+markers",
-        line=dict(color=NAVY, width=3),
-        marker=dict(size=7, color=NAVY),
-        yaxis="y2",
-    ))
-    fig = aplicar_tema_plotly(fig, height=360)
-    fig.update_layout(
-        yaxis=dict(title="Flujo neto", showgrid=True, gridcolor=BORDER,
-                   tickfont=dict(size=11, color=TEXT_MUTED)),
-        yaxis2=dict(title="Saldo", overlaying="y", side="right", showgrid=False,
-                    tickfont=dict(size=11, color=TEXT_MUTED)),
-        bargap=0.35,
-    )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     st.markdown("##### Detalle de cuotas por mes")
     mes_sel = st.selectbox(
