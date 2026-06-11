@@ -2,6 +2,24 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 4.2 — Auth confiable + pulido de Inicio y login
+- Recuperación de contraseña DENTRO de la app: "¿Olvidaste tu contraseña?"
+  en el login + pantalla para crear la nueva (el mail debe configurarse con
+  token_hash, ver instrucciones). Ya no se pierden cuentas.
+- Nuevo .streamlit/config.toml: tema claro forzado (los celulares en modo
+  oscuro ya no rompen la visual), color primario navy (adiós flash rojo al
+  cargar) y toolbar minimal.
+- Logo nuevo de alta resolución (logo_completo_transparente.png), centrado.
+- Inicio reordenado: KPIs → Disponible real → Ritmo de gasto variable
+  (nuevo: gastado a hoy, promedio diario y proyectado a fin de mes) →
+  Composición por categoría (más grande) → Evolución mensual. Se eliminó
+  el gráfico de evolución del saldo.
+- Colores semánticos: ingresos y saldos en navy; naranja solo para gastos;
+  verde/rojo reservados para resultado positivo/negativo.
+- Movimientos: filtro por categoría; "None" ya no aparece en las tablas.
+- Placeholder de email: "Escribe tu mail". Link a wlhnos.vercel.app en el
+  pie del login.
+
 Versión 4.1 — Pulido visual y defaults
 - Ocultos los anchors ("clips") que Streamlit agrega a los títulos.
 - Removidos los emojis de títulos, menú y botones para un look profesional.
@@ -126,6 +144,7 @@ CYAN = "#1595BC"        # Secundario corporativo
 GREEN = "#1C913D"       # Apoyo (positivo)
 GREY = "#6C6D6D"        # Apoyo (neutro)
 ORANGE = "#EA5E2D"      # Apoyo (alerta)
+RED = "#C0392B"         # Solo para resultados negativos
 WHITE = "#FFFFFF"
 
 # Colores derivados (para fondos suaves, hovers, etc.)
@@ -158,7 +177,7 @@ def load_logo_b64(path: str):
     b = load_logo_bytes(path)
     return base64.b64encode(b).decode() if b else None
 
-LOGO_PATH = "logo.png"
+LOGO_PATH = "logo_completo_transparente.png"
 ICON_192_PATH = "icon-192.png"
 ICON_512_PATH = "icon-512.png"
 
@@ -256,6 +275,7 @@ CSS_BRANDING = f"""
     --cyan: {CYAN};
     --green: {GREEN};
     --orange: {ORANGE};
+    --red: {RED};
     --grey: {GREY};
     --navy-hover: {NAVY_HOVER};
     --navy-light: {NAVY_LIGHT};
@@ -428,6 +448,10 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 .metric-card.metric-green .metric-value {{ color: var(--green); }}
 .metric-card.metric-orange .metric-value {{ color: var(--orange); }}
 .metric-card.metric-cyan .metric-value {{ color: var(--cyan); }}
+.metric-card.metric-red .metric-value {{ color: var(--red); }}
+
+/* Toolbar de Streamlit (Share / GitHub / lápiz) oculta */
+[data-testid="stToolbar"] {{ display: none !important; }}
 
 .mov-row {{
     background: white;
@@ -847,6 +871,7 @@ def df_movimientos(user_id):
     df["fecha_devengo"] = pd.to_datetime(df["fecha_devengo"])
     df["inicio_pago"] = pd.to_datetime(df["inicio_pago"])
     df["monto_total"] = df["monto_total"].astype(float)
+    df["concepto"] = df["concepto"].fillna("")
     return df
 
 def expandir_a_caja(df):
@@ -974,8 +999,14 @@ def calcular_estado_flujo(user_id: str):
 # UI HELPERS
 # ============================================================================
 def render_logo(ancho_px: int = 160):
-    if _logo_bytes:
-        st.image(_logo_bytes, width=ancho_px)
+    b64 = load_logo_b64(LOGO_PATH)
+    if b64:
+        st.markdown(
+            f"<div style='text-align:center;'>"
+            f"<img src='data:image/png;base64,{b64}' width='{ancho_px}' "
+            f"alt='WL HNOS &amp; ASOC'/></div>",
+            unsafe_allow_html=True,
+        )
     else:
         st.markdown(
             f"<div style='font-size:{ancho_px//3}px; text-align:center;'>💰</div>",
@@ -1054,7 +1085,7 @@ def page_login():
 
     with tab_in:
         with st.form("login"):
-            email = st.text_input("Email", placeholder="tu@email.com")
+            email = st.text_input("Email", placeholder="Escribe tu mail")
             password = st.text_input("Contraseña", type="password")
             ok = st.form_submit_button("Entrar", use_container_width=True)
             if ok:
@@ -1072,7 +1103,7 @@ def page_login():
 
     with tab_up:
         with st.form("signup"):
-            email = st.text_input("Email", key="su_email", placeholder="tu@email.com")
+            email = st.text_input("Email", key="su_email", placeholder="Escribe tu mail")
             password = st.text_input("Contraseña", type="password", key="su_pw",
                                      help="Mínimo 6 caracteres")
             password2 = st.text_input("Repetir contraseña", type="password", key="su_pw2")
@@ -1091,10 +1122,78 @@ def page_login():
                     else:
                         st.success("Cuenta creada. Revisá tu email para confirmar.")
 
+    with st.expander("¿Olvidaste tu contraseña?"):
+        with st.form("reset_pw"):
+            email_r = st.text_input("Email", key="rp_email", placeholder="Escribe tu mail")
+            ok_r = st.form_submit_button("Enviarme el link de recuperación",
+                                         use_container_width=True)
+            if ok_r:
+                if not email_r or "@" not in email_r:
+                    st.error("Escribí tu mail")
+                else:
+                    try:
+                        sb.auth.reset_password_for_email(email_r)
+                    except Exception:
+                        pass
+                    # Mismo mensaje exista o no la cuenta (no revelar emails registrados)
+                    st.success("Si esa cuenta existe, te enviamos un mail con el link "
+                               "para crear una nueva contraseña. Revisá también spam.")
+
     st.markdown(
-        "<div class='login-footer'>WL HNOS &amp; ASOC · Catamarca</div>",
+        "<div class='login-footer'>WL HNOS &amp; ASOC · Catamarca · "
+        "<a href='https://wlhnos.vercel.app/' target='_blank' "
+        "style='color: var(--cyan); text-decoration: none;'>wlhnos.vercel.app</a></div>",
         unsafe_allow_html=True,
     )
+
+# ============================================================================
+# PANTALLA: NUEVA CONTRASEÑA (llega desde el link del mail de recuperación)
+# ============================================================================
+def page_nueva_password():
+    col_a, col_b, col_c = st.columns([1, 2, 1])
+    with col_b:
+        render_logo(ancho_px=150)
+        st.markdown(
+            "<div style='text-align:center; margin-top:8px;'>"
+            "<h1 style='margin-bottom:4px;'>Crear nueva contraseña</h1></div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("nueva_pw"):
+            p1 = st.text_input("Nueva contraseña", type="password",
+                               help="Mínimo 6 caracteres")
+            p2 = st.text_input("Repetir contraseña", type="password")
+            ok = st.form_submit_button("Guardar y entrar", use_container_width=True)
+        if ok:
+            if len(p1) < 6:
+                st.error("Mínimo 6 caracteres")
+            elif p1 != p2:
+                st.error("Las contraseñas no coinciden")
+            else:
+                try:
+                    r = sb.auth.verify_otp({
+                        "token_hash": st.session_state.recovery_token_hash,
+                        "type": "recovery",
+                    })
+                    if r and r.session:
+                        sb.auth.update_user({"password": p1})
+                        s = sb.auth.get_session()
+                        tok = s or r.session
+                        st.session_state.sb_tokens = {
+                            "access_token": tok.access_token,
+                            "refresh_token": tok.refresh_token,
+                        }
+                        st.session_state.user = r.user
+                        st.session_state.recovery_token_hash = None
+                        st.rerun()
+                    else:
+                        st.error("El link no es válido. Pedí uno nuevo desde el login.")
+                except Exception:
+                    st.session_state.recovery_token_hash = None
+                    st.error("El link venció o ya fue usado. Volvé al login y pedí "
+                             "uno nuevo desde la opción de contraseña olvidada.")
+        if st.button("Volver al inicio de sesión", use_container_width=True):
+            st.session_state.recovery_token_hash = None
+            st.rerun()
 
 # ============================================================================
 # PANTALLA: CARGAR MOVIMIENTO
@@ -1296,16 +1395,21 @@ def page_ver(user):
     # --- Filtros ---
     meses_disp = sorted(df["fecha_devengo"].dt.strftime("%m/%Y").unique(),
                         key=lambda s: (s[3:], s[:2]), reverse=True)
-    col_f1, col_f2 = st.columns(2)
+    cats_disp = sorted(df["categoria"].unique())
+    col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
         mes_f = st.selectbox("Mes", ["Todos"] + meses_disp, key="ver_mes_f")
     with col_f2:
         tipo_f = st.selectbox("Tipo", ["Todos", "Ingreso", "Gasto Fijo",
                                        "Gasto Variable", "Ahorro"], key="ver_tipo_f")
+    with col_f3:
+        cat_f = st.selectbox("Categoría", ["Todas"] + cats_disp, key="ver_cat_f")
     if mes_f != "Todos":
         df = df[df["fecha_devengo"].dt.strftime("%m/%Y") == mes_f]
     if tipo_f != "Todos":
         df = df[df["tipo"] == tipo_f]
+    if cat_f != "Todas":
+        df = df[df["categoria"] == cat_f]
     if df.empty:
         st.info("No hay movimientos con esos filtros.")
         return
@@ -1315,7 +1419,7 @@ def page_ver(user):
     total_aho = df.loc[df["tipo"] == "Ahorro", "monto_total"].sum()
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(metric_card("Ingresos", fmt_money(total_ing), "green"),
+        st.markdown(metric_card("Ingresos", fmt_money(total_ing)),
                     unsafe_allow_html=True)
     with col2:
         st.markdown(metric_card("Gastos", fmt_money(total_gas), "orange"),
@@ -1327,6 +1431,7 @@ def page_ver(user):
     st.write("")
 
     df_view = df.copy()
+    df_view["concepto"] = df_view["concepto"].fillna("")
     df_view["Fecha"] = df_view["fecha_devengo"].dt.strftime("%d/%m/%Y")
     df_view["Inicio pago"] = df_view["inicio_pago"].dt.strftime("%d/%m/%Y")
     df_view["Monto"] = df_view["monto_total"].apply(fmt_money)
@@ -1727,6 +1832,7 @@ def _reporte_flujo(user):
         key="flujo_mes_detalle",
     )
     df_mes = df_caja_rango[df_caja_rango["mes_pago"] == mes_sel].copy()
+    df_mes["concepto"] = df_mes["concepto"].fillna("")
     df_mes["Cuota"] = df_mes.apply(lambda r: f"{r['n_cuota']}/{r['total_cuotas']}", axis=1)
     df_mes["Monto"] = df_mes["monto_cuota"].apply(fmt_money)
     df_mes = df_mes[["tipo", "categoria", "concepto", "Cuota", "Monto"]]
@@ -1983,7 +2089,7 @@ def _dashboard_body(user, estado):
     st.markdown(f"##### Mes: {mes_lbl_sel}")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(metric_card("Ingresos", fmt_money(ingresos_mes), "green"),
+        st.markdown(metric_card("Ingresos", fmt_money(ingresos_mes)),
                     unsafe_allow_html=True)
     with col2:
         st.markdown(metric_card("Gastos", fmt_money(gastos_mes), "orange"),
@@ -1992,7 +2098,7 @@ def _dashboard_body(user, estado):
         st.markdown(metric_card("Ahorro", fmt_money(ahorro_mes), "cyan"),
                     unsafe_allow_html=True)
     with col4:
-        color_res = "green" if resultado_mes >= 0 else "orange"
+        color_res = "green" if resultado_mes >= 0 else "red"
         st.markdown(metric_card("Resultado", fmt_money(resultado_mes), color_res),
                     unsafe_allow_html=True)
 
@@ -2035,7 +2141,7 @@ def _dashboard_body(user, estado):
         with cd3:
             neto = saldo_hoy - comprometido
             st.markdown(metric_card("Disponible neto", fmt_money(neto),
-                                    "green" if neto >= 0 else "orange"), unsafe_allow_html=True)
+                                    "" if neto >= 0 else "red"), unsafe_allow_html=True)
         st.caption(
             "El comprometido son las cuotas de gastos ya cargadas que vencen en meses "
             "futuros: ese dinero conviene tenerlo reservado, no gastarlo."
@@ -2043,95 +2149,37 @@ def _dashboard_body(user, estado):
         st.divider()
 
     # ------------------------------------------------------------------------
-    # GRÁFICO 1: Evolución del saldo final (últimos 12 meses incluyendo el seleccionado)
+    # RITMO DE GASTO VARIABLE (mes en curso)
     # ------------------------------------------------------------------------
-    st.markdown("##### Evolución del saldo final")
-    # Tomamos hasta 12 meses terminando en el mes seleccionado
+    dias_transc = hoy_d.day
+    dias_mes = pd.Timestamp(hoy_d).days_in_month
+    gv_curso = safe_get(pivot_completo, "Gasto Variable", mes_curso_ts)
+    if gv_curso > 0:
+        st.markdown("##### Ritmo de gasto variable (mes en curso)")
+        rg1, rg2, rg3 = st.columns(3)
+        with rg1:
+            st.markdown(metric_card("Gastado al día de hoy", fmt_money(gv_curso)),
+                        unsafe_allow_html=True)
+        with rg2:
+            st.markdown(metric_card("Promedio diario", fmt_money(gv_curso / dias_transc),
+                                    "orange"), unsafe_allow_html=True)
+        with rg3:
+            st.markdown(metric_card(f"Proyectado a fin de {mes_curso_ts.strftime('%m/%Y')}",
+                                    fmt_money(gv_curso / dias_transc * dias_mes), "orange"),
+                        unsafe_allow_html=True)
+        st.caption(
+            f"Los fijos y el ahorro ya están definidos; el mes se juega en los variables. "
+            f"Promedio = gasto variable acumulado dividido los {dias_transc} días "
+            f"transcurridos. El proyectado asume que seguís a este ritmo."
+        )
+        st.divider()
+
+    # Ventana de meses para el gráfico de evolución (hasta 12, terminando en el mes elegido)
     start_idx = max(0, mes_idx - 11)
     meses_chart = meses_todos[start_idx:mes_idx + 1]
-    saldos_chart = [saldos_fin[m] for m in meses_chart]
-
-    df_saldo = pd.DataFrame({
-        "Mes": [m.strftime("%m/%Y") for m in meses_chart],
-        "Saldo final": saldos_chart,
-    })
-    fig_saldo = go.Figure()
-    fig_saldo.add_trace(go.Scatter(
-        x=df_saldo["Mes"], y=df_saldo["Saldo final"],
-        mode="lines+markers",
-        line=dict(color=NAVY, width=3),
-        marker=dict(size=8, color=NAVY),
-        name="Saldo final",
-        fill="tozeroy",
-        fillcolor="rgba(16, 34, 80, 0.08)",
-    ))
-    fig_saldo = aplicar_tema_plotly(fig_saldo, height=320)
-    st.plotly_chart(fig_saldo, use_container_width=True, config={"displayModeBar": False})
 
     # ------------------------------------------------------------------------
-    # GRÁFICO 2: Evolución mensual con selector de serie
-    # (resuelve el problema de escala: cuando elegís una sola serie se autoescala bien)
-    # ------------------------------------------------------------------------
-    st.markdown("##### Evolución mensual")
-    serie_sel = st.radio(
-        "Mostrar",
-        options=["Resultado", "Ingresos", "Gastos", "Ahorro", "Todo"],
-        horizontal=True,
-        index=0,
-        key="dash_serie",
-    )
-
-    # Misma ventana de meses que el gráfico de saldo
-    fig_evol = go.Figure()
-    x_lbls = [m.strftime("%m/%Y") for m in meses_chart]
-
-    def serie_de(tipo):
-        return [safe_get(pivot_completo, tipo, m) for m in meses_chart]
-
-    def serie_gastos():
-        return [safe_get(pivot_completo, "Gasto Fijo", m)
-                + safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
-
-    def serie_resultado():
-        return [safe_get(pivot_completo, "Ingreso", m)
-                - safe_get(pivot_completo, "Gasto Fijo", m)
-                - safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
-
-    if serie_sel == "Resultado":
-        vals = serie_resultado()
-        colores = [GREEN if v >= 0 else ORANGE for v in vals]
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=vals, name="Resultado",
-                                  marker_color=colores, marker_line_width=0))
-    elif serie_sel == "Ingresos":
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ingreso"),
-                                  name="Ingresos", marker_color=GREEN, marker_line_width=0))
-    elif serie_sel == "Gastos":
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_gastos(),
-                                  name="Gastos", marker_color=ORANGE, marker_line_width=0))
-    elif serie_sel == "Ahorro":
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ahorro"),
-                                  name="Ahorro", marker_color=CYAN, marker_line_width=0))
-    else:  # Todo
-        for tipo, color in [("Ingreso", GREEN), ("Gasto Fijo", NAVY),
-                            ("Gasto Variable", ORANGE), ("Ahorro", CYAN)]:
-            fig_evol.add_trace(go.Scatter(
-                x=x_lbls, y=serie_de(tipo), name=tipo,
-                mode="lines+markers",
-                line=dict(color=color, width=2.5),
-                marker=dict(size=7, color=color),
-            ))
-
-    fig_evol = aplicar_tema_plotly(fig_evol, height=320)
-    if serie_sel == "Todo":
-        st.caption(
-            "Las series están en la misma escala — si los ingresos son mucho mayores que "
-            "los gastos individuales, estos se ven aplastados contra el cero. "
-            "Para análisis detallado, elegí una serie a la vez."
-        )
-    st.plotly_chart(fig_evol, use_container_width=True, config={"displayModeBar": False})
-
-    # ------------------------------------------------------------------------
-    # GRÁFICO 3: Composición por categoría (gastos + ahorro) con filtros propios
+    # GRÁFICO 1: Composición por categoría (gastos + ahorro) con filtros propios
     # ------------------------------------------------------------------------
     st.markdown("##### Composición por categoría")
 
@@ -2187,7 +2235,8 @@ def _dashboard_body(user, estado):
             textinfo="label+percent",
             marker=dict(line=dict(color="white", width=2)),
         )
-        fig_torta = aplicar_tema_plotly(fig_torta, height=380)
+        fig_torta = aplicar_tema_plotly(fig_torta, height=470)
+        fig_torta.update_layout(margin=dict(t=40, b=40, l=10, r=10))
         fig_torta.update_layout(showlegend=False)
         st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
         st.caption(
@@ -2195,6 +2244,69 @@ def _dashboard_body(user, estado):
             f"en {mes_torta_sel.lower() if mes_torta_sel != 'Todos los meses' else 'todos los meses'}: "
             f"**{fmt_money(total_torta)}**"
         )
+
+    # ------------------------------------------------------------------------
+    # GRÁFICO 2: Evolución mensual con selector de serie
+    # (resuelve el problema de escala: cuando elegís una sola serie se autoescala bien)
+    # ------------------------------------------------------------------------
+    st.markdown("##### Evolución mensual")
+    serie_sel = st.radio(
+        "Mostrar",
+        options=["Resultado", "Ingresos", "Gastos", "Ahorro", "Todo"],
+        horizontal=True,
+        index=0,
+        key="dash_serie",
+    )
+
+    # Misma ventana de meses que el gráfico de saldo
+    fig_evol = go.Figure()
+    x_lbls = [m.strftime("%m/%Y") for m in meses_chart]
+
+    def serie_de(tipo):
+        return [safe_get(pivot_completo, tipo, m) for m in meses_chart]
+
+    def serie_gastos():
+        return [safe_get(pivot_completo, "Gasto Fijo", m)
+                + safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
+
+    def serie_resultado():
+        return [safe_get(pivot_completo, "Ingreso", m)
+                - safe_get(pivot_completo, "Gasto Fijo", m)
+                - safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
+
+    if serie_sel == "Resultado":
+        vals = serie_resultado()
+        colores = [GREEN if v >= 0 else RED for v in vals]
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=vals, name="Resultado",
+                                  marker_color=colores, marker_line_width=0))
+    elif serie_sel == "Ingresos":
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ingreso"),
+                                  name="Ingresos", marker_color=NAVY, marker_line_width=0))
+    elif serie_sel == "Gastos":
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_gastos(),
+                                  name="Gastos", marker_color=ORANGE, marker_line_width=0))
+    elif serie_sel == "Ahorro":
+        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ahorro"),
+                                  name="Ahorro", marker_color=CYAN, marker_line_width=0))
+    else:  # Todo
+        for tipo, color in [("Ingreso", NAVY), ("Gasto Fijo", ORANGE),
+                            ("Gasto Variable", "#f08259"), ("Ahorro", CYAN)]:
+            fig_evol.add_trace(go.Scatter(
+                x=x_lbls, y=serie_de(tipo), name=tipo,
+                mode="lines+markers",
+                line=dict(color=color, width=2.5),
+                marker=dict(size=7, color=color),
+            ))
+
+    fig_evol = aplicar_tema_plotly(fig_evol, height=320)
+    if serie_sel == "Todo":
+        st.caption(
+            "Las series están en la misma escala — si los ingresos son mucho mayores que "
+            "los gastos individuales, estos se ven aplastados contra el cero. "
+            "Para análisis detallado, elegí una serie a la vez."
+        )
+    st.plotly_chart(fig_evol, use_container_width=True, config={"displayModeBar": False})
+
 
 # ============================================================================
 # APP PRINCIPAL (LOGUEADO)
@@ -2241,7 +2353,15 @@ def app(user):
 # ============================================================================
 # ROUTER
 # ============================================================================
-if st.session_state.user is None:
+# Si la URL trae el token del mail de recuperación, capturarlo y limpiar la URL.
+_qp = st.query_params
+if _qp.get("type") == "recovery" and _qp.get("token_hash"):
+    st.session_state.recovery_token_hash = _qp.get("token_hash")
+    st.query_params.clear()
+
+if st.session_state.get("recovery_token_hash"):
+    page_nueva_password()
+elif st.session_state.user is None:
     page_login()
 else:
     app(st.session_state.user)
