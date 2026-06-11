@@ -2,6 +2,17 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.8 — Tanda 2A: Carga simplificada, filtros y disponible real
+- Cargar movimiento: una sola fecha por defecto. Toggle "Pago en cuotas o en
+  otra fecha": si está apagado, cuotas=1 e inicio de pago = fecha del
+  movimiento (la carga típica baja de 7 campos a 4).
+- Ver movimientos: filtros por mes y por tipo; los totales y la tabla
+  respetan el filtro.
+- Dashboard: nueva sección "Disponible real" — saldo a fin del mes en curso,
+  comprometido en cuotas futuras ya cargadas, y el neto disponible.
+- Rendimiento: get_movimientos con caché (ttl 30s); el conteo de movimientos
+  por categoría en Configuración pasa de ~28 consultas a 1.
+
 Versión 3.7 — Fixes críticos pre-rollout (sesión por usuario)
 - FIX CRÍTICO: el cliente Supabase ya no usa @st.cache_resource (era compartido
   entre TODOS los usuarios conectados al mismo tiempo: el login de un usuario
@@ -636,9 +647,22 @@ def contar_movimientos_categoria(user_id, nombre, tipo):
     )
     return res.count or 0
 
+@st.cache_data(ttl=30, show_spinner=False)
+def conteo_movs_por_categoria(user_id: str, tipo: str) -> dict:
+    """Una sola consulta: {nombre_categoria: cantidad de movimientos} para un tipo."""
+    res = (
+        sb.table("movimientos").select("categoria")
+        .eq("user_id", user_id).eq("tipo", tipo).execute().data
+    )
+    out = {}
+    for r in res:
+        out[r["categoria"]] = out.get(r["categoria"], 0) + 1
+    return out
+
 # ============================================================================
 # ACCESO A DATOS: MOVIMIENTOS
 # ============================================================================
+@st.cache_data(ttl=30, show_spinner=False)
 def get_movimientos(user_id: str, limit: int = None):
     q = (
         sb.table("movimientos")
@@ -1027,6 +1051,15 @@ def page_cargar(user):
     )
     cats = get_categorias(user.id, tipo)
 
+    # Fuera del form para que muestre/oculte los campos de cuotas al instante.
+    en_cuotas = st.toggle(
+        "Pago en cuotas o en otra fecha",
+        value=False,
+        key="cargar_en_cuotas",
+        help="Activalo solo si el pago no es el mismo día del movimiento "
+             "(cuotas, tarjeta, pago diferido).",
+    )
+
     with st.form("nuevo_mov", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -1043,19 +1076,21 @@ def page_cargar(user):
         monto = st.number_input("Monto total", min_value=0.0, step=1000.0,
                                 format="%.2f", value=None, placeholder="0,00")
 
-        col3, col4 = st.columns(2)
-        with col3:
-            cuotas = st.number_input("Cuotas", min_value=1, max_value=36, value=1, step=1)
-        with col4:
-            inicio_pago = st.date_input("Inicio pago", value=date.today(),
-                                        format="DD/MM/YYYY")
-
-        if cuotas > 1 and monto and monto > 0:
-            cuota_mensual = monto / cuotas
-            st.info(
-                f"📊 **Estado de Resultados**: {fmt_money(monto)} en {fecha_devengo.strftime('%m/%Y')} (devengado).\n\n"
-                f"📅 **Flujo de Fondos**: {fmt_money(cuota_mensual)}/mes × {cuotas} desde {inicio_pago.strftime('%m/%Y')} (caja)."
+        if en_cuotas:
+            col3, col4 = st.columns(2)
+            with col3:
+                cuotas = st.number_input("Cuotas", min_value=1, max_value=36, value=1, step=1)
+            with col4:
+                inicio_pago = st.date_input("Inicio pago (primera cuota)", value=date.today(),
+                                            format="DD/MM/YYYY")
+            st.caption(
+                "📈 El movimiento completo impacta en el Estado de Resultados en su fecha "
+                "(devengado); las cuotas se reparten en el Flujo de Fondos desde el inicio "
+                "de pago (caja)."
             )
+        else:
+            cuotas = 1
+            inicio_pago = None  # se usa la fecha del movimiento
 
         ok = st.form_submit_button("Guardar movimiento", use_container_width=True)
         if ok:
@@ -1065,8 +1100,9 @@ def page_cargar(user):
                 st.error("El monto debe ser mayor a cero")
             else:
                 try:
+                    inicio_efectivo = inicio_pago if en_cuotas else fecha_devengo
                     insert_movimiento(user.id, fecha_devengo, tipo, categoria, concepto,
-                                      monto, cuotas, inicio_pago)
+                                      monto, cuotas, inicio_efectivo)
                     st.success(f"✅ {tipo} de {fmt_money(monto)} guardado")
                     st.cache_data.clear()
                 except Exception as e:
@@ -1112,6 +1148,23 @@ def page_ver(user):
     df = df_movimientos(user.id)
     if df.empty:
         st.info("No tenés movimientos cargados todavía.")
+        return
+
+    # --- Filtros ---
+    meses_disp = sorted(df["fecha_devengo"].dt.strftime("%m/%Y").unique(),
+                        key=lambda s: (s[3:], s[:2]), reverse=True)
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        mes_f = st.selectbox("Mes", ["Todos"] + meses_disp, key="ver_mes_f")
+    with col_f2:
+        tipo_f = st.selectbox("Tipo", ["Todos", "Ingreso", "Gasto Fijo",
+                                       "Gasto Variable", "Ahorro"], key="ver_tipo_f")
+    if mes_f != "Todos":
+        df = df[df["fecha_devengo"].dt.strftime("%m/%Y") == mes_f]
+    if tipo_f != "Todos":
+        df = df[df["tipo"] == tipo_f]
+    if df.empty:
+        st.info("No hay movimientos con esos filtros.")
         return
 
     total_ing = df.loc[df["tipo"] == "Ingreso", "monto_total"].sum()
@@ -1591,20 +1644,21 @@ def page_configuracion(user):
 
     cats_activas = [c for c in cats_todas if c["activa"]]
     cats_inactivas = [c for c in cats_todas if not c["activa"]]
+    conteos = conteo_movs_por_categoria(user.id, tipo_sel)
 
     st.markdown(f"##### Activas ({len(cats_activas)})")
     if not cats_activas:
         st.caption("No hay categorías activas.")
     for c in cats_activas:
-        _row_categoria(user, c, activa=True)
+        _row_categoria(user, c, activa=True, conteos=conteos)
 
     if cats_inactivas:
         with st.expander(f"Inactivas ({len(cats_inactivas)})"):
             for c in cats_inactivas:
-                _row_categoria(user, c, activa=False)
+                _row_categoria(user, c, activa=False, conteos=conteos)
 
 
-def _row_categoria(user, c, activa):
+def _row_categoria(user, c, activa, conteos):
     cat_id = c["id"]
     nombre_actual = c["nombre"]
     tipo_actual = c["tipo"]
@@ -1654,7 +1708,7 @@ def _row_categoria(user, c, activa):
     else:
         col1, col2, col3 = st.columns([4, 1, 1])
         with col1:
-            afectados = contar_movimientos_categoria(user.id, nombre_actual, tipo_actual)
+            afectados = conteos.get(nombre_actual, 0)
             badge = (f"  <span style='color:{TEXT_MUTED};font-size:0.8em;'>"
                      f"({afectados} mov.)</span>") if afectados > 0 else ""
             st.markdown(
@@ -1867,6 +1921,44 @@ def page_dashboard(user):
     )
 
     st.divider()
+
+    # ------------------------------------------------------------------------
+    # DISPONIBLE REAL (independiente del mes seleccionado arriba)
+    # Saldo a fin del mes en curso vs cuotas de gastos ya comprometidas a futuro.
+    # ------------------------------------------------------------------------
+    hoy_d = date.today()
+    mes_curso_ts = pd.Timestamp(hoy_d.year, hoy_d.month, 1)
+    df_caja_all = estado["df_caja"]
+    comprometido = float(df_caja_all[
+        (df_caja_all["mes_pago"] > mes_curso_ts) &
+        (df_caja_all["tipo"].isin(["Gasto Fijo", "Gasto Variable"]))
+    ]["monto_cuota"].sum())
+
+    saldo_hoy = None
+    for m_ts in meses_todos:
+        if pd.Timestamp(m_ts) <= mes_curso_ts:
+            saldo_hoy = float(saldos_fin[m_ts])
+        else:
+            break
+
+    if saldo_hoy is not None:
+        st.markdown("##### 💼 Disponible real")
+        cd1, cd2, cd3 = st.columns(3)
+        with cd1:
+            st.markdown(metric_card(f"Saldo a fin de {mes_curso_ts.strftime('%m/%Y')}",
+                                    fmt_money(saldo_hoy)), unsafe_allow_html=True)
+        with cd2:
+            st.markdown(metric_card("Comprometido en cuotas futuras",
+                                    fmt_money(comprometido), "orange"), unsafe_allow_html=True)
+        with cd3:
+            neto = saldo_hoy - comprometido
+            st.markdown(metric_card("Disponible neto", fmt_money(neto),
+                                    "green" if neto >= 0 else "orange"), unsafe_allow_html=True)
+        st.caption(
+            "El comprometido son las cuotas de gastos ya cargadas que vencen en meses "
+            "futuros: ese dinero conviene tenerlo reservado, no gastarlo."
+        )
+        st.divider()
 
     # ------------------------------------------------------------------------
     # GRÁFICO 1: Evolución del saldo final (últimos 12 meses incluyendo el seleccionado)
