@@ -2,6 +2,15 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.9 — Tanda 2B: Tipo desde la categoría + Copiar fijos del mes anterior
+- Cargar/Editar: el selector de tipo queda en Ingreso / Gasto / Ahorro. Para
+  Gasto, la categoría ya trae su clasificación (se muestra "· fijo" o
+  "· variable") y el movimiento se guarda con el tipo correcto. Los reportes
+  no cambian. Sin migración: categorias.tipo ya existía.
+- Nuevo en Cargar movimiento: expander "Copiar fijos e ingresos del mes
+  anterior" — grilla editable (montos y conceptos) con tilde por fila; los
+  que parecen ya cargados este mes vienen destildados. Carga en lote.
+
 Versión 3.8 — Tanda 2A: Carga simplificada, filtros y disponible real
 - Cargar movimiento: una sola fecha por defecto. Toggle "Pago en cuotas o en
   otra fecha": si está apagado, cuotas=1 e inicio de pago = fecha del
@@ -1039,17 +1048,31 @@ def page_login():
 # ============================================================================
 # PANTALLA: CARGAR MOVIMIENTO
 # ============================================================================
+def _opciones_categorias(user_id, grupo):
+    """
+    {label: (nombre_categoria, tipo_db)} para el grupo elegido.
+    grupo "Gasto" une Gasto Fijo + Gasto Variable; la categoría elegida
+    determina el tipo que se guarda (el usuario ya no clasifica a mano).
+    """
+    if grupo == "Gasto":
+        out = {}
+        for tipo_db, sufijo in [("Gasto Fijo", "fijo"), ("Gasto Variable", "variable")]:
+            for c in get_categorias(user_id, tipo_db):
+                out[f"{c['nombre']} · {sufijo}"] = (c["nombre"], tipo_db)
+        return dict(sorted(out.items()))
+    return {c["nombre"]: (c["nombre"], grupo) for c in get_categorias(user_id, grupo)}
+
 def page_cargar(user):
     page_header("Nuevo movimiento",
                 "Cargá ingresos, gastos o ahorro con criterio devengado y caja.")
 
-    tipo = st.selectbox(
+    grupo = st.selectbox(
         "Tipo",
-        ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"],
+        ["Ingreso", "Gasto", "Ahorro"],
         index=1,
         key="tipo_select",
     )
-    cats = get_categorias(user.id, tipo)
+    opciones_cat = _opciones_categorias(user.id, grupo)
 
     # Fuera del form para que muestre/oculte los campos de cuotas al instante.
     en_cuotas = st.toggle(
@@ -1066,11 +1089,11 @@ def page_cargar(user):
             fecha_devengo = st.date_input("Fecha del movimiento", value=date.today(),
                                           format="DD/MM/YYYY")
         with col2:
-            if not cats:
-                st.warning(f"Sin categorías de tipo '{tipo}'. Creá una en ⚙️ Configuración.")
-                categoria = None
+            if not opciones_cat:
+                st.warning(f"Sin categorías de tipo '{grupo}'. Creá una en ⚙️ Configuración.")
+                cat_lbl = None
             else:
-                categoria = st.selectbox("Categoría", [c["nombre"] for c in cats])
+                cat_lbl = st.selectbox("Categoría", list(opciones_cat.keys()))
 
         concepto = st.text_input("Concepto / Nota", placeholder="Ej: Período 05/26")
         monto = st.number_input("Monto total", min_value=0.0, step=1000.0,
@@ -1094,12 +1117,13 @@ def page_cargar(user):
 
         ok = st.form_submit_button("Guardar movimiento", use_container_width=True)
         if ok:
-            if not categoria:
+            if not cat_lbl:
                 st.error("Elegí una categoría")
             elif not monto or monto <= 0:
                 st.error("El monto debe ser mayor a cero")
             else:
                 try:
+                    categoria, tipo = opciones_cat[cat_lbl]
                     inicio_efectivo = inicio_pago if en_cuotas else fecha_devengo
                     insert_movimiento(user.id, fecha_devengo, tipo, categoria, concepto,
                                       monto, cuotas, inicio_efectivo)
@@ -1107,6 +1131,74 @@ def page_cargar(user):
                     st.cache_data.clear()
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
+
+    st.divider()
+    with st.expander("📋 Copiar fijos e ingresos del mes anterior"):
+        if st.session_state.pop("flash_copia", None):
+            st.success("✅ Movimientos copiados")
+        hoy = date.today()
+        per_dest = pd.Period(date(hoy.year, hoy.month, 1), "M")
+        per_orig = per_dest - 1
+        df_all = df_movimientos(user.id)
+        base = pd.DataFrame()
+        if not df_all.empty:
+            base = df_all[
+                df_all["tipo"].isin(["Gasto Fijo", "Ingreso"])
+                & (df_all["fecha_devengo"].dt.to_period("M") == per_orig)
+                & (df_all["cuotas"] == 1)
+            ].copy()
+        if base.empty:
+            st.caption(
+                f"No hay gastos fijos ni ingresos (sin cuotas) cargados en "
+                f"{per_orig.strftime('%m/%Y')} para copiar."
+            )
+        else:
+            ya = df_all[df_all["fecha_devengo"].dt.to_period("M") == per_dest]
+            claves_ya = set(zip(ya["tipo"], ya["categoria"], ya["concepto"].fillna("")))
+            base = base.sort_values(["tipo", "categoria"]).reset_index(drop=True)
+            base["_clave"] = list(zip(base["tipo"], base["categoria"],
+                                      base["concepto"].fillna("")))
+            base["Cargar"] = ~base["_clave"].isin(claves_ya)
+
+            ed = pd.DataFrame({
+                "Cargar": base["Cargar"],
+                "Tipo": base["tipo"],
+                "Categoría": base["categoria"],
+                "Concepto": base["concepto"].fillna(""),
+                "Monto": base["monto_total"],
+                "Fecha nueva": (base["fecha_devengo"] + pd.DateOffset(months=1))
+                                .dt.strftime("%d/%m/%Y"),
+            })
+            st.caption(
+                f"Gastos fijos e ingresos de **{per_orig.strftime('%m/%Y')}** → "
+                f"**{per_dest.strftime('%m/%Y')}**. Editá montos (aumentos) y conceptos, "
+                f"y destildá lo que no corresponda. Los que parecen ya cargados este mes "
+                f"vienen destildados."
+            )
+            ed_out = st.data_editor(
+                ed, hide_index=True, use_container_width=True,
+                disabled=["Tipo", "Categoría", "Fecha nueva"],
+                key="copiar_fijos_editor",
+            )
+            n_sel = int(ed_out["Cargar"].sum())
+            if st.button(f"Cargar {n_sel} movimiento(s) en {per_dest.strftime('%m/%Y')}",
+                         disabled=n_sel == 0, key="btn_copiar_fijos"):
+                fechas_nuevas = (base["fecha_devengo"] + pd.DateOffset(months=1)).dt.date.tolist()
+                errores = 0
+                for (_, row), fnueva in zip(ed_out.iterrows(), fechas_nuevas):
+                    if not row["Cargar"] or not row["Monto"] or float(row["Monto"]) <= 0:
+                        continue
+                    try:
+                        insert_movimiento(user.id, fnueva, row["Tipo"], row["Categoría"],
+                                          row["Concepto"], float(row["Monto"]), 1, fnueva)
+                    except Exception:
+                        errores += 1
+                st.cache_data.clear()
+                if errores:
+                    st.warning(f"Hubo {errores} error(es) al copiar; revisá la lista.")
+                else:
+                    st.session_state["flash_copia"] = True
+                st.rerun()
 
     st.divider()
     st.markdown("##### Últimos movimientos")
@@ -1218,21 +1310,27 @@ def page_ver(user):
     st.caption(f"Editando: {label_sel}")
 
     # El selector de Tipo va FUERA del form: los widgets dentro de un st.form
-    # no disparan rerun, así que adentro no refrescaba las categorías y se
-    # podía guardar un movimiento con categoría de otro tipo.
-    tipos_opts = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
-    tipo_idx = tipos_opts.index(mov["tipo"])
-    tipo_e = st.selectbox("Tipo", tipos_opts, index=tipo_idx, key=f"e_tipo_{mov_id}")
+    # no disparan rerun. Tipo simplificado a Ingreso/Gasto/Ahorro: la categoría
+    # determina si un gasto es Fijo o Variable.
+    grupos = ["Ingreso", "Gasto", "Ahorro"]
+    grupo_mov = "Gasto" if mov["tipo"] in ("Gasto Fijo", "Gasto Variable") else mov["tipo"]
+    grupo_e = st.selectbox("Tipo", grupos, index=grupos.index(grupo_mov),
+                           key=f"e_tipo_{mov_id}")
 
-    cats_activas = get_categorias(user.id, tipo_e, solo_activas=True)
-    nombres_cats = [c["nombre"] for c in cats_activas]
-    # La categoría original se ofrece aunque esté inactiva, pero solo si el
-    # tipo elegido sigue siendo el original (si no, sería de otro tipo).
-    if tipo_e == mov["tipo"] and mov["categoria"] not in nombres_cats:
-        nombres_cats = [mov["categoria"]] + nombres_cats
+    opciones_cat = _opciones_categorias(user.id, grupo_e)
+    # Ofrecer la categoría original aunque esté inactiva (solo si el grupo coincide).
+    lbl_orig = None
+    if grupo_e == grupo_mov:
+        if grupo_mov == "Gasto":
+            sufijo = "fijo" if mov["tipo"] == "Gasto Fijo" else "variable"
+            lbl_orig = f"{mov['categoria']} · {sufijo}"
+        else:
+            lbl_orig = mov["categoria"]
+        if lbl_orig not in opciones_cat:
+            opciones_cat = {lbl_orig: (mov["categoria"], mov["tipo"]), **opciones_cat}
 
-    if not nombres_cats:
-        st.warning(f"Sin categorías activas de tipo '{tipo_e}'. Creá una en ⚙️ Configuración.")
+    if not opciones_cat:
+        st.warning(f"Sin categorías activas de tipo '{grupo_e}'. Creá una en ⚙️ Configuración.")
 
     with st.form(f"edit_{mov_id}"):
         col1, col2 = st.columns(2)
@@ -1241,11 +1339,13 @@ def page_ver(user):
                                     value=pd.to_datetime(mov["fecha_devengo"]).date(),
                                     format="DD/MM/YYYY", key=f"e_fdev_{mov_id}")
         with col2:
-            if nombres_cats:
-                cat_idx = nombres_cats.index(mov["categoria"]) if mov["categoria"] in nombres_cats else 0
-                cat_e = st.selectbox("Categoría", nombres_cats, index=cat_idx, key=f"e_cat_{mov_id}")
+            if opciones_cat:
+                labels = list(opciones_cat.keys())
+                cat_idx = labels.index(lbl_orig) if lbl_orig in labels else 0
+                cat_lbl_e = st.selectbox("Categoría", labels, index=cat_idx,
+                                         key=f"e_cat_{mov_id}")
             else:
-                cat_e = None
+                cat_lbl_e = None
 
         concepto_e = st.text_input("Concepto / Nota",
                                    value=mov["concepto"] or "", key=f"e_con_{mov_id}")
@@ -1269,13 +1369,14 @@ def page_ver(user):
             eliminar = st.form_submit_button("🗑️ Eliminar", use_container_width=True)
 
         if guardar:
-            if not cat_e:
+            if not cat_lbl_e:
                 st.error("Elegí una categoría")
             elif monto_e <= 0:
                 st.error("El monto debe ser mayor a cero")
             else:
                 try:
-                    update_movimiento(user.id, mov_id, fecha_e, tipo_e, cat_e,
+                    cat_e, tipo_db_e = opciones_cat[cat_lbl_e]
+                    update_movimiento(user.id, mov_id, fecha_e, tipo_db_e, cat_e,
                                       concepto_e, monto_e, cuotas_e, inicio_e)
                     st.success("✅ Movimiento actualizado")
                     st.cache_data.clear()
