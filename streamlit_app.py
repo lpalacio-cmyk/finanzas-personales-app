@@ -2,6 +2,17 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 4.0 — Tanda 2C: Reestructura de pantallas
+- Menú reducido a 5: Inicio · Cargar movimiento · Movimientos · Reportes ·
+  Configuración. Inicio absorbe el Dashboard; Reportes une Estado de
+  Resultados y Flujo de Fondos con un selector devengado/caja.
+- "Resultado" ya no resta el Ahorro: Resultado = Ingresos − Gastos. El ER
+  muestra además "Resultado después de ahorro". El saldo (caja) sigue
+  descontando el ahorro porque ese dinero sale de la cuenta.
+- "Ajustar saldo inicial" (delta aditivo, críptico) reemplazado por
+  "Conciliar saldo": el usuario informa su saldo real a fin de mes y la app
+  calcula y guarda el ajuste sola.
+
 Versión 3.9 — Tanda 2B: Tipo desde la categoría + Copiar fijos del mes anterior
 - Cargar/Editar: el selector de tipo queda en Ingreso / Gasto / Ahorro. Para
   Gasto, la categoría ya trae su clasificación (se muestra "· fijo" o
@@ -1409,9 +1420,8 @@ def page_ver(user):
 # ============================================================================
 # PANTALLA: ESTADO DE RESULTADOS
 # ============================================================================
-def page_resultados(user):
-    page_header("Estado de Resultados",
-                "Criterio devengado · Agrupado por el mes de la fecha del movimiento.")
+def _reporte_resultados(user):
+    st.caption("Criterio devengado · Agrupado por el mes de la fecha del movimiento.")
 
     df = df_movimientos(user.id)
     if df.empty:
@@ -1448,12 +1458,15 @@ def page_resultados(user):
     orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
     pivot = pivot.reindex([t for t in orden if t in pivot.index])
 
-    pivot.loc["Resultado del período"] = (
-        (pivot.loc["Ingreso"] if "Ingreso" in pivot.index else 0)
-        - (pivot.loc["Gasto Fijo"] if "Gasto Fijo" in pivot.index else 0)
-        - (pivot.loc["Gasto Variable"] if "Gasto Variable" in pivot.index else 0)
-        - (pivot.loc["Ahorro"] if "Ahorro" in pivot.index else 0)
-    )
+    def _fila(t):
+        return pivot.loc[t] if t in pivot.index else 0
+    resultado = _fila("Ingreso") - _fila("Gasto Fijo") - _fila("Gasto Variable")
+    pivot.loc["Resultado del período"] = resultado
+    pivot.loc["Resultado después de ahorro"] = resultado - _fila("Ahorro")
+    orden_final = [r for r in ["Ingreso", "Gasto Fijo", "Gasto Variable",
+                               "Resultado del período", "Ahorro",
+                               "Resultado después de ahorro"] if r in pivot.index]
+    pivot = pivot.reindex(orden_final)
 
     pivot.columns = [c.strftime("%m/%Y") for c in pivot.columns]
     pivot_fmt = pivot.copy().map(fmt_money)
@@ -1461,7 +1474,7 @@ def page_resultados(user):
     st.dataframe(pivot_fmt, use_container_width=True)
 
     st.caption(
-        "Los gráficos de evolución mensual y de gastos por categoría viven en **📊 Dashboard**."
+        "Los gráficos de evolución mensual y de gastos por categoría viven en **🏠 Inicio**."
     )
 
     st.markdown("##### Detalle por categoría")
@@ -1492,9 +1505,8 @@ def page_resultados(user):
 # ============================================================================
 # PANTALLA: FLUJO DE FONDOS
 # ============================================================================
-def page_flujo(user):
-    page_header("Flujo de Fondos",
-                "Criterio caja · Cuotas distribuidas en el mes que corresponde.")
+def _reporte_flujo(user):
+    st.caption("Criterio caja · Cuotas distribuidas en el mes que corresponde.")
 
     df = df_movimientos(user.id)
     if df.empty:
@@ -1581,85 +1593,78 @@ def page_flujo(user):
         primer_lbl = primer_mes_global.strftime("%m/%Y")
         st.caption(
             f"⚠ El primer mes con movimientos ({primer_lbl}) arranca con saldo inicial $0,00. "
-            f"Si tenías dinero antes de empezar a usar la app, cargá el saldo de partida como un "
-            f"ajuste manual abajo (el ajuste para el primer mes funciona como saldo absoluto)."
+            f"Si tenías dinero antes de empezar a usar la app, conciliá el saldo de ese mes "
+            f"abajo: decile a la app cuánto tenías realmente y listo."
         )
 
     # ------------------------------------------------------------------------
     # AJUSTAR saldo inicial de un mes (widgets sueltos para preview en vivo)
     # ------------------------------------------------------------------------
     st.divider()
-    st.markdown("##### ✏ Ajustar saldo inicial")
+    st.markdown("##### ✏ Conciliar saldo")
     st.caption(
-        "El ajuste se SUMA al saldo inicial calculado automáticamente. "
-        "Sirve para reconciliar discrepancias (si el saldo real es distinto al calculado) "
-        "y se preserva en los meses siguientes. Para el primer mes con movimientos, "
-        "el ajuste funciona como saldo de partida absoluto. Cargá 0 y guardá para borrarlo."
+        "Elegí un mes y decile a la app cuál es tu saldo REAL a fin de ese mes "
+        "(lo que ves en tu billetera o banco). La diferencia se registra como "
+        "ajuste y se arrastra a los meses siguientes."
     )
 
     meses_opts_lbl = [m.strftime("%m/%Y") for m in meses_rango]
     meses_opts_ts = list(meses_rango)
 
-    col_mes, col_aj = st.columns([1, 2])
+    col_mes, col_saldo = st.columns([1, 2])
     with col_mes:
         mes_idx = st.selectbox(
             "Mes",
             options=list(range(len(meses_opts_lbl))),
             format_func=lambda i: meses_opts_lbl[i],
-            index=0,
-            key="aj_mes_idx",
+            index=len(meses_opts_lbl) - 1,
+            key="conc_mes_idx",
         )
     mes_ts_sel = meses_opts_ts[mes_idx]
     mes_lbl_sel = meses_opts_lbl[mes_idx]
-    auto_sel = float(saldo_auto[mes_ts_sel])
+    saldo_fin_actual = float(saldos_fin[mes_ts_sel])
     ajuste_actual = float(ajuste[mes_ts_sel])
 
-    with col_aj:
-        # Key dinámica por mes: al cambiar el selector, el input se "resetea" al ajuste de ese mes.
-        ajuste_input = st.number_input(
-            "Tu ajuste manual (positivo o negativo)",
-            value=ajuste_actual,
+    with col_saldo:
+        # Key dinámica por mes: al cambiar el selector, el input se resetea
+        # al saldo calculado de ese mes.
+        saldo_real = st.number_input(
+            f"Tu saldo real a fin de {mes_lbl_sel}",
+            value=saldo_fin_actual,
             step=10000.0,
             format="%.2f",
-            key=f"aj_input_{mes_ts_sel.isoformat()}",
+            key=f"conc_input_{mes_ts_sel.isoformat()}",
         )
 
-    ajuste_efectivo = float(ajuste_input or 0.0)
-    saldo_efectivo = auto_sel + ajuste_efectivo
+    delta = float(saldo_real or 0.0) - saldo_fin_actual
+    if abs(delta) < 0.005:
+        st.caption(
+            f"✅ Coincide con el saldo calculado por la app "
+            f"({fmt_money(saldo_fin_actual)}). No hay nada que ajustar."
+        )
+    else:
+        st.markdown(
+            f"<div style='background: var(--bg-soft); border: 1px solid var(--border); "
+            f"border-radius: 8px; padding: 12px 16px; margin: 8px 0;'>"
+            f"<div style='color: var(--text-muted); font-size: 0.85rem;'>Vista previa para {mes_lbl_sel}:</div>"
+            f"<div style='font-family: Poppins, sans-serif; color: var(--navy); margin-top: 4px;'>"
+            f"Según la app: {fmt_money(saldo_fin_actual)} · Tu saldo real: {fmt_money(float(saldo_real or 0.0))} · "
+            f"Ajuste a registrar: <strong>{fmt_money(delta)}</strong>"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
 
-    # Preview en vivo: el usuario ve qué pasa antes de guardar
-    st.markdown(
-        f"<div style='background: var(--bg-soft); border: 1px solid var(--border); "
-        f"border-radius: 8px; padding: 12px 16px; margin: 8px 0;'>"
-        f"<div style='color: var(--text-muted); font-size: 0.85rem;'>Vista previa para {mes_lbl_sel}:</div>"
-        f"<div style='font-family: \"Poppins\", sans-serif; color: var(--navy); margin-top: 4px;'>"
-        f"{fmt_money(auto_sel)} <span style='color: var(--text-muted);'>(automático)</span> "
-        f"+ {fmt_money(ajuste_efectivo)} <span style='color: var(--text-muted);'>(ajuste)</span> = "
-        f"<strong>{fmt_money(saldo_efectivo)}</strong> "
-        f"<span style='color: var(--text-muted);'>(saldo inicial efectivo)</span>"
-        f"</div></div>",
-        unsafe_allow_html=True,
-    )
-
-    if st.button("💾 Guardar ajuste", use_container_width=False, key="btn_guardar_aj"):
+    if st.button("💾 Guardar conciliación", key="btn_conciliar", disabled=abs(delta) < 0.005):
         try:
-            if ajuste_efectivo == 0.0:
-                # Si el usuario puso 0, borramos el registro (si existía)
-                if mes_ts_sel.date().replace(day=1) in ajustes_manuales:
-                    delete_saldo_inicial(user.id, mes_ts_sel.date())
-                    st.success(f"✅ Ajuste de {mes_lbl_sel} eliminado. Vuelve al cálculo automático.")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.info("No hay nada que guardar (ajuste = 0 y no había registro previo).")
+            nuevo_ajuste = ajuste_actual + delta
+            if abs(nuevo_ajuste) < 0.005:
+                delete_saldo_inicial(user.id, mes_ts_sel.date())
+                st.success(f"✅ Conciliado: {mes_lbl_sel} vuelve al cálculo automático.")
             else:
-                upsert_saldo_inicial(user.id, mes_ts_sel.date(), ajuste_efectivo)
-                st.success(
-                    f"✅ Ajuste de {fmt_money(ajuste_efectivo)} guardado para {mes_lbl_sel}. "
-                    f"Saldo inicial efectivo: {fmt_money(saldo_efectivo)}."
-                )
-                st.cache_data.clear()
-                st.rerun()
+                upsert_saldo_inicial(user.id, mes_ts_sel.date(), nuevo_ajuste)
+                st.success(f"✅ Conciliado: saldo de {mes_lbl_sel} = {fmt_money(float(saldo_real))}.")
+            st.cache_data.clear()
+            st.rerun()
         except Exception as e:
             st.error(f"Error al guardar: {e}")
 
@@ -1695,6 +1700,35 @@ def page_flujo(user):
         file_name="flujo_de_fondos.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+# ============================================================================
+# PANTALLA: REPORTES (Estado de Resultados + Flujo de Fondos)
+# ============================================================================
+def page_reportes(user):
+    page_header("Reportes", "Dos miradas sobre los mismos datos: devengado y caja.")
+    criterio = st.radio(
+        "Criterio",
+        ["📈 Estado de Resultados", "📅 Flujo de Fondos"],
+        horizontal=True,
+        key="rep_criterio",
+        label_visibility="collapsed",
+    )
+    with st.expander("📚 ¿Cuál es la diferencia entre los dos?"):
+        st.markdown(
+            "**Estado de Resultados (criterio devengado)**\n\n"
+            "Mira el mes en el que ocurrió el hecho económico, sin importar cuándo "
+            "lo pagaste. Si comprás algo en 12 cuotas en mayo, el gasto entero "
+            "aparece en mayo. Responde: *¿qué tan bien me fue este mes?*\n\n"
+            "**Flujo de Fondos (criterio caja)**\n\n"
+            "Mira el mes en el que efectivamente entra o sale el dinero. Si comprás "
+            "algo en 12 cuotas en mayo, cada cuota aparece en su mes. Responde: "
+            "*¿cuánto dinero tengo / voy a tener cada mes?*"
+        )
+    st.write("")
+    if "Resultados" in criterio:
+        _reporte_resultados(user)
+    else:
+        _reporte_flujo(user)
 
 # ============================================================================
 # PANTALLA: CONFIGURACIÓN DE CATEGORÍAS
@@ -1856,120 +1890,23 @@ def page_inicio(user):
     nombre = _nombre_de_usuario(user)
     page_header(f"Hola, {nombre}", "Tus finanzas desde un solo lugar.")
 
-    df = df_movimientos(user.id)
-
-    # ------------------------------------------------------------------------
-    # Estado del usuario: primera vez vs ya tiene datos
-    # ------------------------------------------------------------------------
-    if df.empty:
-        st.info(
-            "**Es tu primera vez por acá.** Para empezar:\n\n"
-            "1. Andá a **📝 Cargar movimiento** y registrá un ingreso, gasto o ahorro.\n"
-            "2. Si ya tenías dinero antes de empezar a usar la app, abrí **📅 Flujo de Fondos** "
-            "y cargá tu saldo inicial de partida como un ajuste manual.\n"
-            "3. Ya con algunos movimientos cargados, mirá tu **📊 Dashboard** para ver "
-            "cómo te va mes a mes."
-        )
-    else:
-        n_movs = len(df)
-        ultimo_fecha = df["fecha_devengo"].max()
-        ultimo_fmt = ultimo_fecha.strftime("%d/%m/%Y")
-        primer_fecha = df["fecha_devengo"].min()
-        primer_fmt = primer_fecha.strftime("%m/%Y")
-
-        # KPIs livianos: saldo a fin del mes en curso (no del último mes con datos,
-        # porque podría ser un mes futuro si hay cuotas proyectadas adelante).
-        estado = calcular_estado_flujo(user.id)
-        saldo_actual = None
-        hoy = date.today()
-        mes_curso_d = date(hoy.year, hoy.month, 1)
-        mes_curso_lbl = mes_curso_d.strftime("%m/%Y")
-
-        if estado and estado["meses_todos"]:
-            # Buscar el mes con datos más reciente que NO sea posterior al mes en curso
-            mes_relevante = None
-            for m_ts in estado["meses_todos"]:
-                m_d = m_ts.date().replace(day=1) if hasattr(m_ts, "date") else m_ts
-                if m_d <= mes_curso_d:
-                    mes_relevante = m_ts
-                else:
-                    break  # los meses están ordenados ascendentemente
-            if mes_relevante is not None:
-                saldo_actual = estado["saldos_fin"][mes_relevante]
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(metric_card("Movimientos cargados", str(n_movs)), unsafe_allow_html=True)
-        with col2:
-            st.markdown(metric_card("Último registrado", ultimo_fmt), unsafe_allow_html=True)
-        with col3:
-            if saldo_actual is not None:
-                color = "green" if saldo_actual >= 0 else "orange"
-                st.markdown(
-                    metric_card(f"Saldo a fin de {mes_curso_lbl}", fmt_money(saldo_actual), color),
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    metric_card(f"Saldo a fin de {mes_curso_lbl}", "—"),
-                    unsafe_allow_html=True,
-                )
-
-        st.caption(
-            f"Llevás registro desde {primer_fmt}. Para ver el detalle, "
-            f"andá al **📊 Dashboard** o al **📅 Flujo de Fondos**."
-        )
-
-    st.divider()
-
-    # ------------------------------------------------------------------------
-    # Guía rápida de pestañas
-    # ------------------------------------------------------------------------
-    st.markdown("##### ¿Qué hace cada pestaña?")
-    st.markdown(
-        "- **🏠 Inicio**: esta pantalla, con tu resumen y la guía.\n"
-        "- **📊 Dashboard**: vista ejecutiva del mes con KPIs y gráficos.\n"
-        "- **📝 Cargar movimiento**: registrar un nuevo ingreso, gasto o ahorro (con cuotas si corresponde).\n"
-        "- **📋 Ver movimientos**: lista de todo lo cargado, con opción de editar o eliminar.\n"
-        "- **📈 Estado de Resultados**: cuánto ganaste y gastaste cada mes según *cuándo ocurrió*.\n"
-        "- **📅 Flujo de Fondos**: cómo entra y sale el dinero mes a mes según *cuándo se paga*. "
-        "Acá también cargás tu saldo inicial.\n"
-        "- **⚙️ Configuración**: gestionar tus categorías (agregar, renombrar, desactivar)."
-    )
-
-    st.divider()
-
-    # ------------------------------------------------------------------------
-    # Aclaración devengado vs caja (resuelve dudas conceptuales del item 12)
-    # ------------------------------------------------------------------------
-    with st.expander("📚 ¿Cuál es la diferencia entre Estado de Resultados y Flujo de Fondos?"):
-        st.markdown(
-            "**Estado de Resultados (criterio devengado)**\n\n"
-            "Mira el mes en el que ocurrió el hecho económico, sin importar cuándo lo pagaste.\n"
-            "Si comprás algo en 12 cuotas en mayo, el gasto entero aparece en mayo.\n"
-            "Útil para responder: *¿qué tan bien me fue este mes, en términos económicos?*\n\n"
-            "**Flujo de Fondos (criterio caja)**\n\n"
-            "Mira el mes en el que efectivamente entró o salió el dinero.\n"
-            "Si comprás algo en 12 cuotas en mayo, cada cuota aparece en su mes correspondiente.\n"
-            "Útil para responder: *¿cuánto dinero tengo / voy a tener en cada mes?*\n\n"
-            "Los dos criterios son útiles. El primero te dice si gastás más de lo que ganás; "
-            "el segundo te dice si te vas a quedar sin dinero en algún mes."
-        )
-
-# ============================================================================
-# PANTALLA: DASHBOARD
-# ============================================================================
-def page_dashboard(user):
-    page_header("Dashboard", "Vista rápida de tu situación financiera.")
-
     estado = calcular_estado_flujo(user.id)
     if estado is None:
         st.info(
-            "No tenés movimientos cargados todavía. "
-            "Empezá desde **📝 Cargar movimiento**."
+            "**Es tu primera vez por acá.** Para empezar:\n\n"
+            "1. Andá a **📝 Cargar movimiento** y registrá un ingreso, gasto o ahorro.\n"
+            "2. Si ya tenías dinero antes de empezar, abrí **📊 Reportes → Flujo de Fondos** "
+            "y conciliá tu saldo: le decís a la app cuánto tenés realmente y listo.\n"
+            "3. Volvé acá para ver tu resumen mes a mes."
         )
         return
 
+    _dashboard_body(user, estado)
+
+# ============================================================================
+# CUERPO DEL DASHBOARD (se muestra dentro de Inicio)
+# ============================================================================
+def _dashboard_body(user, estado):
     pivot_completo = estado["pivot_completo"]
     flujo_neto = estado["flujo_neto"]
     meses_todos = estado["meses_todos"]
@@ -1997,7 +1934,7 @@ def page_dashboard(user):
     gastos_mes = (safe_get(pivot_completo, "Gasto Fijo", mes_sel)
                   + safe_get(pivot_completo, "Gasto Variable", mes_sel))
     ahorro_mes = safe_get(pivot_completo, "Ahorro", mes_sel)
-    resultado_mes = float(flujo_neto.loc[mes_sel])
+    resultado_mes = ingresos_mes - gastos_mes  # el Ahorro no es un gasto: se muestra aparte
     saldo_fin_mes = float(saldos_fin[mes_sel])
 
     st.markdown(f"##### Mes: {mes_lbl_sel}")
@@ -2018,7 +1955,8 @@ def page_dashboard(user):
 
     st.caption(
         f"Saldo final estimado a fin de {mes_lbl_sel}: **{fmt_money(saldo_fin_mes)}** "
-        f"(montos por criterio caja)."
+        f"(criterio caja). Resultado = Ingresos − Gastos; el Ahorro se muestra aparte: "
+        f"igual sale de tu saldo, pero no es dinero perdido."
     )
 
     st.divider()
@@ -2112,7 +2050,9 @@ def page_dashboard(user):
                 + safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
 
     def serie_resultado():
-        return [float(flujo_neto.loc[m]) for m in meses_chart]
+        return [safe_get(pivot_completo, "Ingreso", m)
+                - safe_get(pivot_completo, "Gasto Fijo", m)
+                - safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
 
     if serie_sel == "Resultado":
         vals = serie_resultado()
@@ -2238,26 +2178,20 @@ def app(user):
 
     page = st.sidebar.radio("Menú", [
         "🏠 Inicio",
-        "📊 Dashboard",
         "📝 Cargar movimiento",
-        "📋 Ver movimientos",
-        "📈 Estado de Resultados",
-        "📅 Flujo de Fondos",
+        "📋 Movimientos",
+        "📊 Reportes",
         "⚙️ Configuración",
     ], label_visibility="collapsed")
 
     if "Inicio" in page:
         page_inicio(user)
-    elif "Dashboard" in page:
-        page_dashboard(user)
     elif "Cargar" in page:
         page_cargar(user)
-    elif "Ver" in page:
+    elif "Movimientos" in page:
         page_ver(user)
-    elif "Estado" in page:
-        page_resultados(user)
-    elif "Flujo" in page:
-        page_flujo(user)
+    elif "Reportes" in page:
+        page_reportes(user)
     elif "Configuración" in page:
         page_configuracion(user)
 
