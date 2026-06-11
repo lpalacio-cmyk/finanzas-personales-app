@@ -1120,7 +1120,8 @@ def page_login():
                     if err:
                         st.error(f"Error: {err}")
                     else:
-                        st.success("Cuenta creada. Revisá tu email para confirmar.")
+                        st.success("Cuenta creada. Ya podés entrar desde la pestaña "
+                                   "\"Iniciar sesión\" con tu mail y contraseña.")
 
     with st.expander("¿Olvidaste tu contraseña?"):
         with st.form("reset_pw"):
