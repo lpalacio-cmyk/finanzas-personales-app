@@ -2,6 +2,16 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 4.3 — Auth parte 2: Google, sesión persistente y sidebar mobile
+- Botón "Continuar con Google" en el login (Supabase OAuth, flujo implícito:
+  un JS mueve los tokens del fragmento #... a query params y la app inicia
+  la sesión). Requiere el provider Google configurado en Supabase.
+- Sesión persistente: el refresh token se guarda en una cookie (30 días).
+  Al cerrar el navegador y volver, la app restaura la sesión sola. Nuevo
+  requirement: extra-streamlit-components (actualizar requirements.txt).
+- Mobile: al elegir una pestaña del menú, la sidebar se cierra sola
+  (workaround con JS sobre selectores internos de Streamlit; best effort).
+
 Versión 4.2 — Auth confiable + pulido de Inicio y login
 - Recuperación de contraseña DENTRO de la app: "¿Olvidaste tu contraseña?"
   en el login + pantalla para crear la nueva (el mail debe configurarse con
@@ -127,7 +137,9 @@ Versión 3.1 — Rebranding:
 import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client, Client
-from datetime import date
+from datetime import date, datetime, timedelta
+from urllib.parse import quote
+import extra_streamlit_components as stx
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 import plotly.express as px
@@ -139,6 +151,8 @@ import base64
 # ============================================================================
 # CONSTANTES DE MARCA (Manual de Identidad WL HNOS & ASOC)
 # ============================================================================
+APP_URL = "https://finanzas-personales-app.streamlit.app"
+
 NAVY = "#102250"        # Principal corporativo
 CYAN = "#1595BC"        # Secundario corporativo
 GREEN = "#1C913D"       # Apoyo (positivo)
@@ -453,6 +467,27 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 /* Toolbar de Streamlit (Share / GitHub / lápiz) oculta */
 [data-testid="stToolbar"] {{ display: none !important; }}
 
+.google-btn {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 0.55rem 1rem;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--navy) !important;
+    font-weight: 600;
+    font-size: 0.95rem;
+    text-decoration: none !important;
+    box-shadow: 0 1px 2px rgba(16, 34, 80, 0.05);
+    transition: box-shadow 0.15s ease;
+}}
+.google-btn:hover {{
+    box-shadow: 0 3px 8px rgba(16, 34, 80, 0.12);
+}}
+
 .mov-row {{
     background: white;
     border: 1px solid var(--border);
@@ -546,6 +581,46 @@ if "user" not in st.session_state:
 if "sb_tokens" not in st.session_state:
     st.session_state.sb_tokens = None
 
+# ----------------------------------------------------------------------------
+# COOKIE DE SESIÓN PERSISTENTE
+# Guarda el refresh token 30 días para que cerrar el navegador no desloguee.
+# ----------------------------------------------------------------------------
+cookie_manager = stx.CookieManager(key="wl_cookies")
+
+def _guardar_cookie_sesion(refresh_token: str, key: str):
+    try:
+        cookie_manager.set(
+            "wl_rt", refresh_token,
+            expires_at=datetime.now() + timedelta(days=30),
+            key=key,
+        )
+    except Exception:
+        pass
+
+# Si no hay sesión en esta pestaña pero hay cookie, restaurar.
+if not st.session_state.sb_tokens and not st.session_state.user:
+    _rt_cookie = None
+    try:
+        _rt_cookie = cookie_manager.get("wl_rt")
+    except Exception:
+        pass
+    if _rt_cookie:
+        try:
+            r = sb.auth.refresh_session(_rt_cookie)
+            if r and r.session:
+                st.session_state.sb_tokens = {
+                    "access_token": r.session.access_token,
+                    "refresh_token": r.session.refresh_token,
+                }
+                st.session_state.user = r.user
+                # Supabase rota el refresh token: guardar el nuevo.
+                _guardar_cookie_sesion(r.session.refresh_token, "ck_restore")
+        except Exception:
+            try:
+                cookie_manager.delete("wl_rt", key="ck_del_invalid")
+            except Exception:
+                pass
+
 # Rehidratar la sesión de ESTE usuario en cada ejecución del script.
 # Si el access token venció, set_session lo refresca solo con el refresh token;
 # en ese caso guardamos los tokens nuevos.
@@ -557,6 +632,9 @@ if st.session_state.sb_tokens:
         )
         s = sb.auth.get_session()
         if s:
+            if s.refresh_token != st.session_state.sb_tokens.get("refresh_token"):
+                # Hubo refresh (rotación): actualizar también la cookie.
+                _guardar_cookie_sesion(s.refresh_token, "ck_rotate")
             st.session_state.sb_tokens = {
                 "access_token": s.access_token,
                 "refresh_token": s.refresh_token,
@@ -585,6 +663,7 @@ def do_signin(email, password):
                 "access_token": r.session.access_token,
                 "refresh_token": r.session.refresh_token,
             }
+            _guardar_cookie_sesion(r.session.refresh_token, "ck_login")
             # Si es la primera vez que entra (todavía no tiene categorías),
             # le sembramos el set por defecto.
             try:
@@ -598,6 +677,10 @@ def do_signin(email, password):
 def do_signout():
     try:
         sb.auth.sign_out()
+    except Exception:
+        pass
+    try:
+        cookie_manager.delete("wl_rt", key="ck_del_logout")
     except Exception:
         pass
     st.session_state.user = None
@@ -1065,7 +1148,40 @@ def aplicar_tema_plotly(fig: go.Figure, height: int = 320):
 # ============================================================================
 # PANTALLA: LOGIN
 # ============================================================================
+_OAUTH_HASH_JS = """
+<script>
+// Tras el redirect de Google, Supabase devuelve los tokens en el fragmento
+// (#access_token=...), que el servidor no puede leer. Este script los mueve
+// a query params y recarga, para que Python pueda iniciar la sesión.
+try {
+    const hash = window.parent.location.hash;
+    if (hash && hash.indexOf("access_token") !== -1) {
+        const p = new URLSearchParams(hash.substring(1));
+        const at = p.get("access_token");
+        const rt = p.get("refresh_token");
+        if (at && rt) {
+            const url = new URL(window.parent.location.href);
+            url.hash = "";
+            url.searchParams.set("at", at);
+            url.searchParams.set("rt", rt);
+            window.parent.location.replace(url.toString());
+        }
+    }
+} catch (e) {}
+</script>
+"""
+
+_GOOGLE_SVG = (
+    "<svg width='18' height='18' viewBox='0 0 48 48'>"
+    "<path fill='#FFC107' d='M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.5 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.2-.1-2.3-.4-3.5z'/>"
+    "<path fill='#FF3D00' d='M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z'/>"
+    "<path fill='#4CAF50' d='M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z'/>"
+    "<path fill='#1976D2' d='M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.1 5.6l6.2 5.2C36.9 40.4 44 35 44 24c0-1.2-.1-2.3-.4-3.5z'/>"
+    "</svg>"
+)
+
 def page_login():
+    components.html(_OAUTH_HASH_JS, height=0)
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
         render_logo(ancho_px=140)
@@ -1122,6 +1238,15 @@ def page_login():
                     else:
                         st.success("Cuenta creada. Ya podés entrar desde la pestaña "
                                    "\"Iniciar sesión\" con tu mail y contraseña.")
+
+    _auth_url = (f"{st.secrets['SUPABASE_URL']}/auth/v1/authorize"
+                 f"?provider=google&redirect_to={quote(APP_URL, safe='')}")
+    st.markdown(
+        f"<a href='{_auth_url}' target='_self' class='google-btn'>"
+        f"{_GOOGLE_SVG} Continuar con Google</a>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
 
     with st.expander("¿Olvidaste tu contraseña?"):
         with st.form("reset_pw"):
@@ -2312,7 +2437,35 @@ def _dashboard_body(user, estado):
 # ============================================================================
 # APP PRINCIPAL (LOGUEADO)
 # ============================================================================
+_SIDEBAR_MOBILE_JS = """
+<script>
+// En mobile, al elegir una pestaña del menú la sidebar queda abierta tapando
+// el contenido. Esto la cierra automáticamente. Best effort: usa selectores
+// internos de Streamlit que pueden cambiar entre versiones.
+try {
+    const doc = window.parent.document;
+    if (!doc.__wlSidebarHook) {
+        doc.__wlSidebarHook = true;
+        doc.addEventListener("click", function (e) {
+            if (window.parent.innerWidth > 768) return;
+            const sb = e.target.closest('section[data-testid="stSidebar"]');
+            if (!sb) return;
+            const lbl = e.target.closest("label");
+            if (!lbl) return;
+            setTimeout(function () {
+                const btn =
+                    doc.querySelector('[data-testid="stSidebarCollapseButton"] button') ||
+                    doc.querySelector('section[data-testid="stSidebar"] button[kind="headerNoPadding"]');
+                if (btn) btn.click();
+            }, 200);
+        }, true);
+    }
+} catch (e) {}
+</script>
+"""
+
 def app(user):
+    components.html(_SIDEBAR_MOBILE_JS, height=0)
     with st.sidebar:
         if _logo_bytes:
             st.image(_logo_bytes, width=120)
@@ -2354,8 +2507,30 @@ def app(user):
 # ============================================================================
 # ROUTER
 # ============================================================================
-# Si la URL trae el token del mail de recuperación, capturarlo y limpiar la URL.
+# Si la URL trae tokens del login con Google (movidos del # por el JS del login).
 _qp = st.query_params
+if _qp.get("at") and _qp.get("rt"):
+    try:
+        sb.auth.set_session(_qp.get("at"), _qp.get("rt"))
+        s = sb.auth.get_session()
+        u = sb.auth.get_user()
+        if s and u and u.user:
+            st.session_state.sb_tokens = {
+                "access_token": s.access_token,
+                "refresh_token": s.refresh_token,
+            }
+            st.session_state.user = u.user
+            _guardar_cookie_sesion(s.refresh_token, "ck_oauth")
+            try:
+                seed_categorias_si_vacio(u.user.id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    st.query_params.clear()
+    st.rerun()
+
+# Si la URL trae el token del mail de recuperación, capturarlo y limpiar la URL.
 if _qp.get("type") == "recovery" and _qp.get("token_hash"):
     st.session_state.recovery_token_hash = _qp.get("token_hash")
     st.query_params.clear()
