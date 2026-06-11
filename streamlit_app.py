@@ -2,6 +2,16 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 4.1 — Pulido visual y defaults
+- Ocultos los anchors ("clips") que Streamlit agrega a los títulos.
+- Removidos los emojis de títulos, menú y botones para un look profesional.
+- Tarjetas KPI parejas: misma altura mínima, números con dígitos tabulares y
+  tamaño que se achica solo si el monto es largo (ya no se cortan).
+- Ajustes responsive para mobile (tarjetas y tipografía).
+- Todos los selectores de mes (Inicio, detalle del ER, detalle del FF y
+  conciliación) arrancan por defecto en el mes en curso, no en el último mes
+  con datos (que podía ser futuro por cuotas proyectadas).
+
 Versión 4.0 — Tanda 2C: Reestructura de pantallas
 - Menú reducido a 5: Inicio · Cargar movimiento · Movimientos · Reportes ·
   Configuración. Inicio absorbe el Dashboard; Reportes une Estado de
@@ -377,6 +387,11 @@ div[data-testid="stFormSubmitButton"] button:hover {{
     padding: 14px 16px;
     box-shadow: 0 1px 2px rgba(16, 34, 80, 0.04);
     transition: box-shadow 0.15s ease;
+    min-height: 86px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    container-type: inline-size;
 }}
 .metric-card:hover {{
     box-shadow: 0 4px 12px rgba(16, 34, 80, 0.08);
@@ -391,10 +406,24 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 }}
 .metric-card .metric-value {{
     font-family: 'Poppins', sans-serif;
-    font-size: 1.45rem;
+    font-size: clamp(0.95rem, 9cqw, 1.45rem);
     font-weight: 600;
     color: var(--navy);
     line-height: 1.1;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}}
+
+/* Ocultar los anchors ("clips") que Streamlit agrega a los títulos */
+[data-testid="stHeaderActionElements"] {{ display: none !important; }}
+.stMarkdown h1 a, .stMarkdown h2 a, .stMarkdown h3 a,
+.stMarkdown h4 a, .stMarkdown h5 a, .stMarkdown h6 a {{ display: none !important; }}
+
+/* Mobile */
+@media (max-width: 640px) {{
+    .block-container {{ padding-left: 0.9rem !important; padding-right: 0.9rem !important; }}
+    .metric-card {{ min-height: 72px; padding: 12px 14px; }}
+    .page-header .page-title {{ font-size: 1.4rem !important; }}
 }}
 .metric-card.metric-green .metric-value {{ color: var(--green); }}
 .metric-card.metric-orange .metric-value {{ color: var(--orange); }}
@@ -847,6 +876,17 @@ def df_to_excel_bytes(df_dict):
             df.to_excel(writer, sheet_name=nombre, index=False)
     return output.getvalue()
 
+def _default_mes_idx(meses_ts):
+    """Índice del mes en curso en la lista; si no está, el mes más reciente
+    no futuro; si todos son futuros, el primero. Evita que los selectores
+    arranquen en meses proyectados por cuotas."""
+    hoy = date.today()
+    mes_act = pd.Timestamp(hoy.year, hoy.month, 1)
+    candidatos = [i for i, m in enumerate(meses_ts) if pd.Timestamp(m) <= mes_act]
+    if not candidatos:
+        return 0
+    return max(candidatos, key=lambda i: pd.Timestamp(meses_ts[i]))
+
 def rango_fechas_default(df, columna="fecha_devengo"):
     if df.empty:
         hoy = date.today()
@@ -1049,7 +1089,7 @@ def page_login():
                     if err:
                         st.error(f"Error: {err}")
                     else:
-                        st.success("✅ Cuenta creada. Revisá tu email para confirmar.")
+                        st.success("Cuenta creada. Revisá tu email para confirmar.")
 
     st.markdown(
         "<div class='login-footer'>WL HNOS &amp; ASOC · Catamarca</div>",
@@ -1101,7 +1141,7 @@ def page_cargar(user):
                                           format="DD/MM/YYYY")
         with col2:
             if not opciones_cat:
-                st.warning(f"Sin categorías de tipo '{grupo}'. Creá una en ⚙️ Configuración.")
+                st.warning(f"Sin categorías de tipo '{grupo}'. Creá una en Configuración.")
                 cat_lbl = None
             else:
                 cat_lbl = st.selectbox("Categoría", list(opciones_cat.keys()))
@@ -1118,7 +1158,7 @@ def page_cargar(user):
                 inicio_pago = st.date_input("Inicio pago (primera cuota)", value=date.today(),
                                             format="DD/MM/YYYY")
             st.caption(
-                "📈 El movimiento completo impacta en el Estado de Resultados en su fecha "
+                "El movimiento completo impacta en el Estado de Resultados en su fecha "
                 "(devengado); las cuotas se reparten en el Flujo de Fondos desde el inicio "
                 "de pago (caja)."
             )
@@ -1138,15 +1178,15 @@ def page_cargar(user):
                     inicio_efectivo = inicio_pago if en_cuotas else fecha_devengo
                     insert_movimiento(user.id, fecha_devengo, tipo, categoria, concepto,
                                       monto, cuotas, inicio_efectivo)
-                    st.success(f"✅ {tipo} de {fmt_money(monto)} guardado")
+                    st.success(f"{tipo} de {fmt_money(monto)} guardado")
                     st.cache_data.clear()
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
 
     st.divider()
-    with st.expander("📋 Copiar fijos e ingresos del mes anterior"):
+    with st.expander("Copiar fijos e ingresos del mes anterior"):
         if st.session_state.pop("flash_copia", None):
-            st.success("✅ Movimientos copiados")
+            st.success("Movimientos copiados")
         hoy = date.today()
         per_dest = pd.Period(date(hoy.year, hoy.month, 1), "M")
         per_orig = per_dest - 1
@@ -1297,7 +1337,7 @@ def page_ver(user):
     st.dataframe(df_view, hide_index=True, use_container_width=True)
 
     st.divider()
-    st.markdown("##### ✏️ Editar / Eliminar")
+    st.markdown("##### Editar / Eliminar")
 
     movs = df.to_dict("records")
     def label_mov(m):
@@ -1341,7 +1381,7 @@ def page_ver(user):
             opciones_cat = {lbl_orig: (mov["categoria"], mov["tipo"]), **opciones_cat}
 
     if not opciones_cat:
-        st.warning(f"Sin categorías activas de tipo '{grupo_e}'. Creá una en ⚙️ Configuración.")
+        st.warning(f"Sin categorías activas de tipo '{grupo_e}'. Creá una en Configuración.")
 
     with st.form(f"edit_{mov_id}"):
         col1, col2 = st.columns(2)
@@ -1375,9 +1415,9 @@ def page_ver(user):
 
         col_g, col_d = st.columns(2)
         with col_g:
-            guardar = st.form_submit_button("💾 Guardar cambios", use_container_width=True)
+            guardar = st.form_submit_button("Guardar cambios", use_container_width=True)
         with col_d:
-            eliminar = st.form_submit_button("🗑️ Eliminar", use_container_width=True)
+            eliminar = st.form_submit_button("Eliminar", use_container_width=True)
 
         if guardar:
             if not cat_lbl_e:
@@ -1389,7 +1429,7 @@ def page_ver(user):
                     cat_e, tipo_db_e = opciones_cat[cat_lbl_e]
                     update_movimiento(user.id, mov_id, fecha_e, tipo_db_e, cat_e,
                                       concepto_e, monto_e, cuotas_e, inicio_e)
-                    st.success("✅ Movimiento actualizado")
+                    st.success("Movimiento actualizado")
                     st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
@@ -1403,7 +1443,7 @@ def page_ver(user):
         st.warning(f"¿Confirmás eliminar este movimiento? **{label_sel}**")
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("✅ Sí, eliminar", use_container_width=True, key=f"si_del_{mov_id}"):
+            if st.button("Sí, eliminar", use_container_width=True, key=f"si_del_{mov_id}"):
                 try:
                     delete_movimiento(user.id, mov_id)
                     st.session_state.pop(f"confirmar_del_{mov_id}", None)
@@ -1413,7 +1453,7 @@ def page_ver(user):
                 except Exception as e:
                     st.error(f"Error al eliminar: {e}")
         with c2:
-            if st.button("❌ Cancelar", use_container_width=True, key=f"no_del_{mov_id}"):
+            if st.button("Cancelar", use_container_width=True, key=f"no_del_{mov_id}"):
                 st.session_state.pop(f"confirmar_del_{mov_id}", None)
                 st.rerun()
 
@@ -1474,7 +1514,7 @@ def _reporte_resultados(user):
     st.dataframe(pivot_fmt, use_container_width=True)
 
     st.caption(
-        "Los gráficos de evolución mensual y de gastos por categoría viven en **🏠 Inicio**."
+        "Los gráficos de evolución mensual y de gastos por categoría viven en **Inicio**."
     )
 
     st.markdown("##### Detalle por categoría")
@@ -1482,6 +1522,7 @@ def _reporte_resultados(user):
     mes_sel = st.selectbox(
         "Seleccionar mes",
         options=meses_disp,
+        index=_default_mes_idx(meses_disp),
         format_func=lambda d: pd.Timestamp(d).strftime("%m/%Y"),
         key="mes_detalle_er",
     )
@@ -1592,7 +1633,7 @@ def _reporte_flujo(user):
     if primer_mes_global_d not in ajustes_manuales:
         primer_lbl = primer_mes_global.strftime("%m/%Y")
         st.caption(
-            f"⚠ El primer mes con movimientos ({primer_lbl}) arranca con saldo inicial $0,00. "
+            f"El primer mes con movimientos ({primer_lbl}) arranca con saldo inicial $0,00. "
             f"Si tenías dinero antes de empezar a usar la app, conciliá el saldo de ese mes "
             f"abajo: decile a la app cuánto tenías realmente y listo."
         )
@@ -1601,7 +1642,7 @@ def _reporte_flujo(user):
     # AJUSTAR saldo inicial de un mes (widgets sueltos para preview en vivo)
     # ------------------------------------------------------------------------
     st.divider()
-    st.markdown("##### ✏ Conciliar saldo")
+    st.markdown("##### Conciliar saldo")
     st.caption(
         "Elegí un mes y decile a la app cuál es tu saldo REAL a fin de ese mes "
         "(lo que ves en tu billetera o banco). La diferencia se registra como "
@@ -1617,7 +1658,7 @@ def _reporte_flujo(user):
             "Mes",
             options=list(range(len(meses_opts_lbl))),
             format_func=lambda i: meses_opts_lbl[i],
-            index=len(meses_opts_lbl) - 1,
+            index=_default_mes_idx(meses_opts_ts),
             key="conc_mes_idx",
         )
     mes_ts_sel = meses_opts_ts[mes_idx]
@@ -1654,15 +1695,15 @@ def _reporte_flujo(user):
             unsafe_allow_html=True,
         )
 
-    if st.button("💾 Guardar conciliación", key="btn_conciliar", disabled=abs(delta) < 0.005):
+    if st.button("Guardar conciliación", key="btn_conciliar", disabled=abs(delta) < 0.005):
         try:
             nuevo_ajuste = ajuste_actual + delta
             if abs(nuevo_ajuste) < 0.005:
                 delete_saldo_inicial(user.id, mes_ts_sel.date())
-                st.success(f"✅ Conciliado: {mes_lbl_sel} vuelve al cálculo automático.")
+                st.success(f"Conciliado: {mes_lbl_sel} vuelve al cálculo automático.")
             else:
                 upsert_saldo_inicial(user.id, mes_ts_sel.date(), nuevo_ajuste)
-                st.success(f"✅ Conciliado: saldo de {mes_lbl_sel} = {fmt_money(float(saldo_real))}.")
+                st.success(f"Conciliado: saldo de {mes_lbl_sel} = {fmt_money(float(saldo_real))}.")
             st.cache_data.clear()
             st.rerun()
         except Exception as e:
@@ -1677,9 +1718,11 @@ def _reporte_flujo(user):
         (df_caja["mes_pago"].dt.date >= desde) &
         (df_caja["mes_pago"].dt.date <= hasta)
     ].copy()
+    meses_det = sorted(df_caja_rango["mes_pago"].unique(), reverse=True)
     mes_sel = st.selectbox(
         "Seleccionar mes",
-        options=sorted(df_caja_rango["mes_pago"].unique(), reverse=True),
+        options=meses_det,
+        index=_default_mes_idx(meses_det),
         format_func=lambda d: pd.Timestamp(d).strftime("%m/%Y"),
         key="flujo_mes_detalle",
     )
@@ -1708,12 +1751,12 @@ def page_reportes(user):
     page_header("Reportes", "Dos miradas sobre los mismos datos: devengado y caja.")
     criterio = st.radio(
         "Criterio",
-        ["📈 Estado de Resultados", "📅 Flujo de Fondos"],
+        ["Estado de Resultados", "Flujo de Fondos"],
         horizontal=True,
         key="rep_criterio",
         label_visibility="collapsed",
     )
-    with st.expander("📚 ¿Cuál es la diferencia entre los dos?"):
+    with st.expander("¿Cuál es la diferencia entre los dos?"):
         st.markdown(
             "**Estado de Resultados (criterio devengado)**\n\n"
             "Mira el mes en el que ocurrió el hecho económico, sin importar cuándo "
@@ -1754,7 +1797,7 @@ def page_configuracion(user):
                 label_visibility="collapsed",
             )
         with col2:
-            ok_nueva = st.form_submit_button("➕ Agregar", use_container_width=True)
+            ok_nueva = st.form_submit_button("Agregar", use_container_width=True)
         if ok_nueva:
             n = (nuevo_nombre or "").strip()
             if not n:
@@ -1764,7 +1807,7 @@ def page_configuracion(user):
             else:
                 try:
                     insert_categoria(user.id, n, tipo_sel)
-                    st.success(f"✅ Categoría '{n}' creada")
+                    st.success(f"Categoría '{n}' creada")
                     st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
@@ -1831,7 +1874,7 @@ def _row_categoria(user, c, activa, conteos):
                                 f"✅ Renombrada a '{n}'. {afectados} movimiento(s) actualizados."
                             )
                         else:
-                            st.success(f"✅ Renombrada a '{n}'")
+                            st.success(f"Renombrada a '{n}'")
                         st.session_state.pop(edit_key, None)
                         st.cache_data.clear()
                         st.rerun()
@@ -1894,8 +1937,8 @@ def page_inicio(user):
     if estado is None:
         st.info(
             "**Es tu primera vez por acá.** Para empezar:\n\n"
-            "1. Andá a **📝 Cargar movimiento** y registrá un ingreso, gasto o ahorro.\n"
-            "2. Si ya tenías dinero antes de empezar, abrí **📊 Reportes → Flujo de Fondos** "
+            "1. Andá a **Cargar movimiento** y registrá un ingreso, gasto o ahorro.\n"
+            "2. Si ya tenías dinero antes de empezar, abrí **Reportes → Flujo de Fondos** "
             "y conciliá tu saldo: le decís a la app cuánto tenés realmente y listo.\n"
             "3. Volvé acá para ver tu resumen mes a mes."
         )
@@ -1918,7 +1961,7 @@ def _dashboard_body(user, estado):
         "Mes a analizar",
         options=list(range(len(meses_lbl))),
         format_func=lambda i: meses_lbl[i],
-        index=len(meses_lbl) - 1,
+        index=_default_mes_idx(meses_todos),
         key="dash_mes_idx",
     )
     mes_sel = meses_todos[mes_idx]
@@ -1981,7 +2024,7 @@ def _dashboard_body(user, estado):
             break
 
     if saldo_hoy is not None:
-        st.markdown("##### 💼 Disponible real")
+        st.markdown("##### Disponible real")
         cd1, cd2, cd3 = st.columns(3)
         with cd1:
             st.markdown(metric_card(f"Saldo a fin de {mes_curso_ts.strftime('%m/%Y')}",
@@ -2002,7 +2045,7 @@ def _dashboard_body(user, estado):
     # ------------------------------------------------------------------------
     # GRÁFICO 1: Evolución del saldo final (últimos 12 meses incluyendo el seleccionado)
     # ------------------------------------------------------------------------
-    st.markdown("##### 💰 Evolución del saldo final")
+    st.markdown("##### Evolución del saldo final")
     # Tomamos hasta 12 meses terminando en el mes seleccionado
     start_idx = max(0, mes_idx - 11)
     meses_chart = meses_todos[start_idx:mes_idx + 1]
@@ -2029,7 +2072,7 @@ def _dashboard_body(user, estado):
     # GRÁFICO 2: Evolución mensual con selector de serie
     # (resuelve el problema de escala: cuando elegís una sola serie se autoescala bien)
     # ------------------------------------------------------------------------
-    st.markdown("##### 📈 Evolución mensual")
+    st.markdown("##### Evolución mensual")
     serie_sel = st.radio(
         "Mostrar",
         options=["Resultado", "Ingresos", "Gastos", "Ahorro", "Todo"],
@@ -2090,7 +2133,7 @@ def _dashboard_body(user, estado):
     # ------------------------------------------------------------------------
     # GRÁFICO 3: Composición por categoría (gastos + ahorro) con filtros propios
     # ------------------------------------------------------------------------
-    st.markdown("##### 🥧 Composición por categoría")
+    st.markdown("##### Composición por categoría")
 
     # Selectores propios para este gráfico (independientes del selector principal)
     col_t1, col_t2 = st.columns([3, 2])
@@ -2168,7 +2211,7 @@ def app(user):
         )
         st.markdown(
             f"<div style='margin:14px 0 6px; color:{NAVY}; font-weight:600; font-size:0.9rem;'>"
-            f"👤 {user.email}"
+            f"{user.email}"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -2177,11 +2220,11 @@ def app(user):
         st.divider()
 
     page = st.sidebar.radio("Menú", [
-        "🏠 Inicio",
-        "📝 Cargar movimiento",
-        "📋 Movimientos",
-        "📊 Reportes",
-        "⚙️ Configuración",
+        "Inicio",
+        "Cargar movimiento",
+        "Movimientos",
+        "Reportes",
+        "Configuración",
     ], label_visibility="collapsed")
 
     if "Inicio" in page:
