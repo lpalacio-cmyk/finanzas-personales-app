@@ -2,6 +2,19 @@
 Finanzas WL - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 3.7 — Fixes críticos pre-rollout (sesión por usuario)
+- FIX CRÍTICO: el cliente Supabase ya no usa @st.cache_resource (era compartido
+  entre TODOS los usuarios conectados al mismo tiempo: el login de un usuario
+  pisaba la sesión de los demás). Ahora los tokens viven en st.session_state
+  (individual por navegador) y la sesión se rehidrata en cada ejecución.
+- Esto también arregla el vencimiento del token (~1 hora): set_session
+  refresca automáticamente y la app ya no "se vacía" en silencio.
+- do_signout ya no limpia cachés globales (no le rompe la conexión al resto).
+- FIX: en Ver movimientos, el selector "Tipo" del form de edición salió del
+  st.form (los widgets dentro de un form no refrescan): al cambiar el tipo
+  ahora se actualizan las categorías y ya no se puede guardar un movimiento
+  con categoría de otro tipo.
+
 Versión 3.6 — Ajustes finos sobre Tanda 3
 - "plata" → "dinero" en toda la app
 - Estado de Resultados: removidos los gráficos de evolución mensual y torta
@@ -430,8 +443,11 @@ st.markdown(CSS_BRANDING, unsafe_allow_html=True)
 # ============================================================================
 # CONEXIÓN A SUPABASE
 # ============================================================================
-@st.cache_resource
 def init_supabase() -> Client:
+    # SIN @st.cache_resource: cache_resource es GLOBAL al servidor (compartido
+    # entre todos los usuarios conectados). El cliente se crea por ejecución y
+    # la sesión de cada usuario se rehidrata desde st.session_state, que sí es
+    # individual por navegador.
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
@@ -443,6 +459,28 @@ sb = init_supabase()
 # ============================================================================
 if "user" not in st.session_state:
     st.session_state.user = None
+if "sb_tokens" not in st.session_state:
+    st.session_state.sb_tokens = None
+
+# Rehidratar la sesión de ESTE usuario en cada ejecución del script.
+# Si el access token venció, set_session lo refresca solo con el refresh token;
+# en ese caso guardamos los tokens nuevos.
+if st.session_state.sb_tokens:
+    try:
+        sb.auth.set_session(
+            st.session_state.sb_tokens["access_token"],
+            st.session_state.sb_tokens["refresh_token"],
+        )
+        s = sb.auth.get_session()
+        if s:
+            st.session_state.sb_tokens = {
+                "access_token": s.access_token,
+                "refresh_token": s.refresh_token,
+            }
+    except Exception:
+        # Token inválido o vencido sin posibilidad de refresh: volver al login.
+        st.session_state.user = None
+        st.session_state.sb_tokens = None
 
 # ============================================================================
 # AUTENTICACIÓN
@@ -456,19 +494,15 @@ def do_signup(email, password):
 
 def do_signin(email, password):
     try:
-        # Defensa: limpiar cualquier sesión previa que pudiera estar contaminada
-        # antes de iniciar la nueva. Evita que el cliente Supabase cacheado quede
-        # con headers/tokens del usuario anterior.
-        try:
-            sb.auth.sign_out()
-        except Exception:
-            pass
-        st.cache_data.clear()
-
         r = sb.auth.sign_in_with_password({"email": email, "password": password})
-        # Si es la primera vez que entra (todavía no tiene categorías),
-        # le sembramos el set por defecto.
-        if r.user:
+        if r.user and r.session:
+            # Guardar los tokens en la sesión de ESTE navegador.
+            st.session_state.sb_tokens = {
+                "access_token": r.session.access_token,
+                "refresh_token": r.session.refresh_token,
+            }
+            # Si es la primera vez que entra (todavía no tiene categorías),
+            # le sembramos el set por defecto.
             try:
                 seed_categorias_si_vacio(r.user.id)
             except Exception:
@@ -483,8 +517,7 @@ def do_signout():
     except Exception:
         pass
     st.session_state.user = None
-    st.cache_data.clear()
-    st.cache_resource.clear()  # fuerza recreación del cliente Supabase con sesión limpia
+    st.session_state.sb_tokens = None
     st.rerun()
 
 # ============================================================================
@@ -1129,26 +1162,37 @@ def page_ver(user):
     mov_id = opciones[label_sel]
     mov = next(m for m in movs if m["id"] == mov_id)
 
+    st.caption(f"Editando: {label_sel}")
+
+    # El selector de Tipo va FUERA del form: los widgets dentro de un st.form
+    # no disparan rerun, así que adentro no refrescaba las categorías y se
+    # podía guardar un movimiento con categoría de otro tipo.
+    tipos_opts = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
+    tipo_idx = tipos_opts.index(mov["tipo"])
+    tipo_e = st.selectbox("Tipo", tipos_opts, index=tipo_idx, key=f"e_tipo_{mov_id}")
+
+    cats_activas = get_categorias(user.id, tipo_e, solo_activas=True)
+    nombres_cats = [c["nombre"] for c in cats_activas]
+    # La categoría original se ofrece aunque esté inactiva, pero solo si el
+    # tipo elegido sigue siendo el original (si no, sería de otro tipo).
+    if tipo_e == mov["tipo"] and mov["categoria"] not in nombres_cats:
+        nombres_cats = [mov["categoria"]] + nombres_cats
+
+    if not nombres_cats:
+        st.warning(f"Sin categorías activas de tipo '{tipo_e}'. Creá una en ⚙️ Configuración.")
+
     with st.form(f"edit_{mov_id}"):
-        st.caption(f"Editando: {label_sel}")
-
-        tipos_opts = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
-        tipo_idx = tipos_opts.index(mov["tipo"])
-        tipo_e = st.selectbox("Tipo", tipos_opts, index=tipo_idx, key=f"e_tipo_{mov_id}")
-
-        cats_activas = get_categorias(user.id, tipo_e, solo_activas=True)
-        nombres_cats = [c["nombre"] for c in cats_activas]
-        if mov["categoria"] not in nombres_cats:
-            nombres_cats = [mov["categoria"]] + nombres_cats
-
         col1, col2 = st.columns(2)
         with col1:
             fecha_e = st.date_input("Fecha del movimiento",
                                     value=pd.to_datetime(mov["fecha_devengo"]).date(),
                                     format="DD/MM/YYYY", key=f"e_fdev_{mov_id}")
         with col2:
-            cat_idx = nombres_cats.index(mov["categoria"]) if mov["categoria"] in nombres_cats else 0
-            cat_e = st.selectbox("Categoría", nombres_cats, index=cat_idx, key=f"e_cat_{mov_id}")
+            if nombres_cats:
+                cat_idx = nombres_cats.index(mov["categoria"]) if mov["categoria"] in nombres_cats else 0
+                cat_e = st.selectbox("Categoría", nombres_cats, index=cat_idx, key=f"e_cat_{mov_id}")
+            else:
+                cat_e = None
 
         concepto_e = st.text_input("Concepto / Nota",
                                    value=mov["concepto"] or "", key=f"e_con_{mov_id}")
@@ -1172,7 +1216,9 @@ def page_ver(user):
             eliminar = st.form_submit_button("🗑️ Eliminar", use_container_width=True)
 
         if guardar:
-            if monto_e <= 0:
+            if not cat_e:
+                st.error("Elegí una categoría")
+            elif monto_e <= 0:
                 st.error("El monto debe ser mayor a cero")
             else:
                 try:
