@@ -1242,7 +1242,7 @@ def page_login():
     _auth_url = (f"{st.secrets['SUPABASE_URL'].strip().rstrip('/')}/auth/v1/authorize"
                  f"?provider=google&redirect_to={quote(APP_URL, safe='')}")
     st.markdown(
-        f"<a href='{_auth_url}' target='_self' class='google-btn'>"
+        f"<a href='{_auth_url}' target='_blank' rel='noopener' class='google-btn'>"
         f"{_GOOGLE_SVG} Continuar con Google</a>",
         unsafe_allow_html=True,
     )
