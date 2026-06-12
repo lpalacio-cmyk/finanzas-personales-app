@@ -1239,7 +1239,7 @@ def page_login():
                         st.success("Cuenta creada. Ya podés entrar desde la pestaña "
                                    "\"Iniciar sesión\" con tu mail y contraseña.")
 
-    _auth_url = (f"{st.secrets['SUPABASE_URL']}/auth/v1/authorize"
+    _auth_url = (f"{st.secrets['SUPABASE_URL'].strip().rstrip('/')}/auth/v1/authorize"
                  f"?provider=google&redirect_to={quote(APP_URL, safe='')}")
     st.markdown(
         f"<a href='{_auth_url}' target='_self' class='google-btn'>"
