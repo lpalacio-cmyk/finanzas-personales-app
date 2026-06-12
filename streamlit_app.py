@@ -138,6 +138,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client, Client
 from datetime import date, datetime, timedelta
+import hashlib
+import secrets as _secrets
+import httpx
 from urllib.parse import quote
 import extra_streamlit_components as stx
 from dateutil.relativedelta import relativedelta
@@ -1148,36 +1151,6 @@ def aplicar_tema_plotly(fig: go.Figure, height: int = 320):
 # ============================================================================
 # PANTALLA: LOGIN
 # ============================================================================
-_OAUTH_HASH_JS = """
-<script>
-// Tras el redirect de Google, Supabase devuelve los tokens en el fragmento
-// (#access_token=...), que el servidor no puede leer. Este script los mueve
-// a query params y recarga, para que Python pueda iniciar la sesión.
-function _wl_go(w) {
-    const hash = w.location.hash;
-    if (hash && hash.indexOf("access_token") !== -1) {
-        const p = new URLSearchParams(hash.substring(1));
-        const at = p.get("access_token");
-        const rt = p.get("refresh_token");
-        if (at && rt) {
-            const url = new URL(w.location.href);
-            url.hash = "";
-            url.searchParams.set("at", at);
-            url.searchParams.set("rt", rt);
-            w.location.replace(url.toString());
-            return true;
-        }
-    }
-    return false;
-}
-try { _wl_go(window.parent); }
-catch (e) {
-    try { _wl_go(window.top); }
-    catch (e2) { console.log("WL oauth js bloqueado:", e, e2); }
-}
-</script>
-"""
-
 _GOOGLE_SVG = (
     "<svg width='18' height='18' viewBox='0 0 48 48'>"
     "<path fill='#FFC107' d='M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.5 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.2-.1-2.3-.4-3.5z'/>"
@@ -1187,8 +1160,15 @@ _GOOGLE_SVG = (
     "</svg>"
 )
 
+def _pkce_par():
+    """Genera (verifier, challenge) PKCE; el verifier persiste en la sesión."""
+    if not st.session_state.get("pkce_verifier"):
+        st.session_state.pkce_verifier = _secrets.token_urlsafe(64)
+    v = st.session_state.pkce_verifier
+    ch = base64.urlsafe_b64encode(hashlib.sha256(v.encode()).digest()).decode().rstrip("=")
+    return v, ch
+
 def page_login():
-    components.html(_OAUTH_HASH_JS, height=0)
     _oe = st.session_state.pop("oauth_error", None)
     if _oe:
         st.error(f"No se pudo completar el ingreso con Google: {_oe}")
@@ -1249,8 +1229,18 @@ def page_login():
                         st.success("Cuenta creada. Ya podés entrar desde la pestaña "
                                    "\"Iniciar sesión\" con tu mail y contraseña.")
 
+    _verifier, _challenge = _pkce_par()
+    # El verifier viaja en una cookie para que la pestaña que vuelve de Google
+    # (que es una sesión nueva de Streamlit) pueda completar el intercambio.
+    try:
+        cookie_manager.set("wl_pkce", _verifier,
+                           expires_at=datetime.now() + timedelta(minutes=15),
+                           key="ck_pkce")
+    except Exception:
+        pass
     _auth_url = (f"{st.secrets['SUPABASE_URL'].strip().rstrip('/')}/auth/v1/authorize"
-                 f"?provider=google&redirect_to={quote(APP_URL, safe='')}")
+                 f"?provider=google&redirect_to={quote(APP_URL, safe='')}"
+                 f"&code_challenge={_challenge}&code_challenge_method=s256")
     st.markdown(
         f"<a href='{_auth_url}' target='_blank' rel='noopener' class='google-btn'>"
         f"{_GOOGLE_SVG} Continuar con Google</a>",
@@ -2517,28 +2507,70 @@ def app(user):
 # ============================================================================
 # ROUTER
 # ============================================================================
-# Si la URL trae tokens del login con Google (movidos del # por el JS del login).
+# Vuelta del login con Google: PKCE, el código llega en ?code= (legible por el servidor).
 _qp = st.query_params
-if _qp.get("at") and _qp.get("rt"):
+if _qp.get("error_description"):
+    st.session_state["oauth_error"] = _qp.get("error_description")
+    st.query_params.clear()
+    st.rerun()
+
+if _qp.get("code"):
+    _verifier = None
     try:
-        sb.auth.set_session(_qp.get("at"), _qp.get("rt"))
-        s = sb.auth.get_session()
-        u = sb.auth.get_user()
-        if s and u and u.user:
-            st.session_state.sb_tokens = {
-                "access_token": s.access_token,
-                "refresh_token": s.refresh_token,
-            }
-            st.session_state.user = u.user
-            _guardar_cookie_sesion(s.refresh_token, "ck_oauth")
-            try:
-                seed_categorias_si_vacio(u.user.id)
-            except Exception:
-                pass
-        else:
-            st.session_state["oauth_error"] = "la sesión no se pudo crear (token vacío)."
-    except Exception as e:
-        st.session_state["oauth_error"] = str(e)
+        _verifier = cookie_manager.get("wl_pkce")
+    except Exception:
+        pass
+    if not _verifier:
+        _verifier = st.session_state.get("pkce_verifier")
+
+    if not _verifier and st.session_state.get("pkce_intentos", 0) < 2:
+        # La cookie todavía no llegó del navegador (primer render): esperar
+        # un ciclo; el componente de cookies dispara un rerun solo.
+        st.session_state["pkce_intentos"] = st.session_state.get("pkce_intentos", 0) + 1
+        st.stop()
+
+    if _verifier:
+        try:
+            resp = httpx.post(
+                f"{st.secrets['SUPABASE_URL'].strip().rstrip('/')}/auth/v1/token?grant_type=pkce",
+                json={"auth_code": _qp.get("code"), "code_verifier": _verifier},
+                headers={"apikey": st.secrets["SUPABASE_KEY"],
+                         "Content-Type": "application/json"},
+                timeout=15,
+            )
+            data = resp.json()
+            if resp.status_code == 200 and data.get("access_token"):
+                sb.auth.set_session(data["access_token"], data["refresh_token"])
+                u = sb.auth.get_user()
+                if u and u.user:
+                    st.session_state.sb_tokens = {
+                        "access_token": data["access_token"],
+                        "refresh_token": data["refresh_token"],
+                    }
+                    st.session_state.user = u.user
+                    _guardar_cookie_sesion(data["refresh_token"], "ck_oauth")
+                    try:
+                        seed_categorias_si_vacio(u.user.id)
+                    except Exception:
+                        pass
+                else:
+                    st.session_state["oauth_error"] = "no se pudo leer el usuario."
+            else:
+                st.session_state["oauth_error"] = (
+                    data.get("error_description") or data.get("msg") or str(data)
+                )
+        except Exception as e:
+            st.session_state["oauth_error"] = str(e)
+    else:
+        st.session_state["oauth_error"] = (
+            "no llegó el código de verificación del navegador. Probá de nuevo."
+        )
+    st.session_state["pkce_intentos"] = 0
+    st.session_state["pkce_verifier"] = None
+    try:
+        cookie_manager.delete("wl_pkce", key="ck_pkce_del")
+    except Exception:
+        pass
     st.query_params.clear()
     st.rerun()
 
