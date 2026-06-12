@@ -496,10 +496,14 @@ div[data-testid="stFormSubmitButton"] button:hover {{
     fill: var(--navy) !important;
 }}
 
-/* Los componentes invisibles (cookies, etc.) dejan un hueco arriba: ocultarlo.
+/* Los componentes invisibles (cookies) dejan un hueco arriba: ocultarlo.
    Los iframes siguen ejecutándose aunque no se muestren. */
-.element-container:has(> iframe[height="0"]) {{ display: none !important; }}
-div[data-testid="stIFrame"][height="0"] {{ display: none !important; }}
+.element-container:has(iframe) {{ display: none !important; }}
+div[data-testid="stIFrame"] {{ display: none !important; }}
+.stApp .block-container {{ padding-top: 1.2rem !important; }}
+
+/* Navegación horizontal: chips prolijos */
+div[role="radiogroup"][aria-label="Menú"] {{ gap: 4px; flex-wrap: wrap; }}
 
 .google-btn {{
     display: flex;
@@ -2039,6 +2043,15 @@ def page_reportes(user):
 # ============================================================================
 # PANTALLA: CONFIGURACIÓN DE CATEGORÍAS
 # ============================================================================
+def _footer_sesion(user):
+    st.divider()
+    col_u, col_b = st.columns([3, 1])
+    with col_u:
+        st.caption(f"Sesión: {user.email}")
+    with col_b:
+        if st.button("Cerrar sesión", key="signout_footer", use_container_width=True):
+            do_signout()
+
 def page_configuracion(user):
     page_header("Configuración de categorías",
                 "Las categorías se usan al cargar movimientos. Si desactivás una, "
@@ -2468,35 +2481,9 @@ def _dashboard_body(user, estado):
 # ============================================================================
 # APP PRINCIPAL (LOGUEADO)
 # ============================================================================
-_SIDEBAR_MOBILE_JS = """
-<script>
-// En mobile, al elegir una pestaña del menú la sidebar queda abierta tapando
-// el contenido. Esto la cierra automáticamente. Best effort: usa selectores
-// internos de Streamlit que pueden cambiar entre versiones.
-try {
-    const doc = window.parent.document;
-    if (!doc.__wlSidebarHook) {
-        doc.__wlSidebarHook = true;
-        doc.addEventListener("click", function (e) {
-            if (window.parent.innerWidth > 768) return;
-            const sb = e.target.closest('section[data-testid="stSidebar"]');
-            if (!sb) return;
-            const lbl = e.target.closest("label");
-            if (!lbl) return;
-            setTimeout(function () {
-                const btn =
-                    doc.querySelector('[data-testid="stSidebarCollapseButton"] button') ||
-                    doc.querySelector('section[data-testid="stSidebar"] button[kind="headerNoPadding"]');
-                if (btn) btn.click();
-            }, 200);
-        }, true);
-    }
-} catch (e) {}
-</script>
-"""
-
 def app(user):
-    components.html(_SIDEBAR_MOBILE_JS, height=0)
+    # Sidebar solo informativa (en mobile arranca colapsada y el botón para
+    # abrirla es poco confiable; la navegación vive en el cuerpo de la página).
     with st.sidebar:
         if _logo_bytes:
             st.image(_logo_bytes, width=120)
@@ -2514,15 +2501,16 @@ def app(user):
         )
         if st.button("Cerrar sesión", use_container_width=True):
             do_signout()
-        st.divider()
 
-    page = st.sidebar.radio("Menú", [
+    # Navegación principal, siempre visible en cualquier pantalla.
+    page = st.radio("Menú", [
         "Inicio",
-        "Cargar movimiento",
+        "Cargar",
         "Movimientos",
         "Reportes",
         "Configuración",
-    ], label_visibility="collapsed")
+    ], horizontal=True, label_visibility="collapsed", key="nav_principal")
+    st.divider()
 
     if "Inicio" in page:
         page_inicio(user)
@@ -2534,6 +2522,7 @@ def app(user):
         page_reportes(user)
     elif "Configuración" in page:
         page_configuracion(user)
+        _footer_sesion(user)
 
 # ============================================================================
 # ROUTER
