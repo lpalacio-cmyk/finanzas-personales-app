@@ -1153,21 +1153,28 @@ _OAUTH_HASH_JS = """
 // Tras el redirect de Google, Supabase devuelve los tokens en el fragmento
 // (#access_token=...), que el servidor no puede leer. Este script los mueve
 // a query params y recarga, para que Python pueda iniciar la sesión.
-try {
-    const hash = window.parent.location.hash;
+function _wl_go(w) {
+    const hash = w.location.hash;
     if (hash && hash.indexOf("access_token") !== -1) {
         const p = new URLSearchParams(hash.substring(1));
         const at = p.get("access_token");
         const rt = p.get("refresh_token");
         if (at && rt) {
-            const url = new URL(window.parent.location.href);
+            const url = new URL(w.location.href);
             url.hash = "";
             url.searchParams.set("at", at);
             url.searchParams.set("rt", rt);
-            window.parent.location.replace(url.toString());
+            w.location.replace(url.toString());
+            return true;
         }
     }
-} catch (e) {}
+    return false;
+}
+try { _wl_go(window.parent); }
+catch (e) {
+    try { _wl_go(window.top); }
+    catch (e2) { console.log("WL oauth js bloqueado:", e, e2); }
+}
 </script>
 """
 
@@ -1182,6 +1189,9 @@ _GOOGLE_SVG = (
 
 def page_login():
     components.html(_OAUTH_HASH_JS, height=0)
+    _oe = st.session_state.pop("oauth_error", None)
+    if _oe:
+        st.error(f"No se pudo completar el ingreso con Google: {_oe}")
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
         render_logo(ancho_px=140)
@@ -2525,8 +2535,10 @@ if _qp.get("at") and _qp.get("rt"):
                 seed_categorias_si_vacio(u.user.id)
             except Exception:
                 pass
-    except Exception:
-        pass
+        else:
+            st.session_state["oauth_error"] = "la sesión no se pudo crear (token vacío)."
+    except Exception as e:
+        st.session_state["oauth_error"] = str(e)
     st.query_params.clear()
     st.rerun()
 
