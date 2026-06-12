@@ -315,7 +315,6 @@ h1 {{ font-size: 1.85rem !important; }}
 h2 {{ font-size: 1.4rem !important; }}
 h3 {{ font-size: 1.15rem !important; }}
 
-header[data-testid="stHeader"] {{ background: transparent !important; }}
 .block-container {{
     padding-top: 1.5rem !important;
     padding-bottom: 3rem !important;
@@ -470,30 +469,11 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 /* Toolbar de Streamlit (Share / GitHub / lápiz) oculta */
 [data-testid="stToolbar"] {{ display: none !important; }}
 
-/* Botón para ABRIR la sidebar (clave en mobile, donde arranca colapsada):
-   forzarlo visible como burbuja flotante, cubre varios nombres internos
-   según la versión de Streamlit. */
-[data-testid="stSidebarCollapsedControl"],
-[data-testid="stExpandSidebarButton"],
-[data-testid="collapsedControl"] {{
-    display: flex !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-    position: fixed !important;
-    top: 10px !important;
-    left: 10px !important;
-    z-index: 999990 !important;
-    background: white !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 10px !important;
-    box-shadow: 0 2px 8px rgba(16, 34, 80, 0.18) !important;
-    padding: 2px !important;
-}}
-[data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="stExpandSidebarButton"] svg,
-[data-testid="collapsedControl"] svg {{
-    color: var(--navy) !important;
-    fill: var(--navy) !important;
+/* El header de Streamlit es una franja transparente que flota ENCIMA del
+   contenido y bloquea los taps sobre la primera fila del menú en mobile.
+   Ya no lo necesitamos (la navegación vive en el cuerpo): fuera. */
+header[data-testid="stHeader"] {{
+    display: none !important;
 }}
 
 /* Los componentes invisibles (cookies) dejan un hueco arriba: ocultarlo.
