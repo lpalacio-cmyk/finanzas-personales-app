@@ -429,7 +429,7 @@ div[data-testid="stFormSubmitButton"] button:hover {{
     padding: 14px 16px;
     box-shadow: 0 1px 2px rgba(16, 34, 80, 0.04);
     transition: box-shadow 0.15s ease;
-    min-height: 86px;
+    min-height: 94px;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -455,6 +455,13 @@ div[data-testid="stFormSubmitButton"] button:hover {{
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
 }}
+.metric-card .metric-sublabel {{
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-top: 3px;
+    line-height: 1.1;
+}}
 
 /* Ocultar los anchors ("clips") que Streamlit agrega a los títulos */
 [data-testid="stHeaderActionElements"] {{ display: none !important; }}
@@ -464,7 +471,7 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 /* Mobile */
 @media (max-width: 640px) {{
     .block-container {{ padding-left: 0.9rem !important; padding-right: 0.9rem !important; }}
-    .metric-card {{ min-height: 72px; padding: 12px 14px; }}
+    .metric-card {{ min-height: 80px; padding: 12px 14px; }}
     .page-header .page-title {{ font-size: 1.4rem !important; }}
 }}
 .metric-card.metric-green .metric-value {{ color: var(--green); }}
@@ -1336,12 +1343,14 @@ def page_header(titulo: str, caption: str = ""):
         unsafe_allow_html=True,
     )
 
-def metric_card(label: str, value: str, color: str = ""):
+def metric_card(label: str, value: str, color: str = "", sublabel: str = ""):
     cls = f"metric-card metric-{color}" if color else "metric-card"
+    sub = f"<div class='metric-sublabel'>{sublabel}</div>" if sublabel else ""
     return (
         f"<div class='{cls}'>"
         f"<div class='metric-label'>{label}</div>"
         f"<div class='metric-value'>{value}</div>"
+        f"{sub}"
         f"</div>"
     )
 
@@ -2497,7 +2506,8 @@ def _dashboard_body(user, estado):
                     unsafe_allow_html=True)
     with col3:
         color_res = "green" if resultado_mes >= 0 else "red"
-        st.markdown(metric_card("Resultado antes de ahorro", fmt_money(resultado_mes), color_res),
+        st.markdown(metric_card("Resultado", fmt_money(resultado_mes), color_res,
+                                sublabel="antes de ahorro"),
                     unsafe_allow_html=True)
     with col4:
         st.markdown(metric_card("Ahorro", fmt_money(ahorro_mes), "cyan"),
@@ -2646,7 +2656,7 @@ def app(user):
     col_l, col_r = st.columns([3, 2])
     with col_l:
         if _logo_simbolo:
-            st.image(_logo_simbolo, width=46)
+            st.image(_logo_simbolo, width=52)
     with col_r:
         if st.button("Cerrar sesión", use_container_width=True, key="logout_top"):
             do_signout()
