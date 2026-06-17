@@ -150,6 +150,11 @@ import plotly.graph_objects as go
 import io
 import os
 import base64
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.drawing.image import Image as _XLImage
+from openpyxl.utils import get_column_letter as _col
+from openpyxl.worksheet.properties import PageSetupProperties
 
 # ============================================================================
 # CONSTANTES DE MARCA (Manual de Identidad WL HNOS & ASOC)
@@ -475,6 +480,10 @@ div[data-testid="stFormSubmitButton"] button:hover {{
 header[data-testid="stHeader"] {{
     display: none !important;
 }}
+
+/* Sidebar eliminada: la navegación y la sesión viven en el cuerpo */
+section[data-testid="stSidebar"] {{ display: none !important; }}
+div[data-testid="collapsedControl"] {{ display: none !important; }}
 
 /* Los componentes invisibles (cookies) dejan un hueco arriba: ocultarlo.
    Los iframes siguen ejecutándose aunque no se muestren. */
@@ -995,12 +1004,214 @@ def expandir_a_caja(df):
             })
     return pd.DataFrame(filas)
 
-def df_to_excel_bytes(df_dict):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for nombre, df in df_dict.items():
-            df.to_excel(writer, sheet_name=nombre, index=False)
-    return output.getvalue()
+# Estilos de marca para los Excel descargables
+_XL_FONT = "Arial"
+_XL_MONEY = '[$-2C0A]"$ "#,##0.00;[Red][$-2C0A]"-$ "#,##0.00'
+_XL_PCT = '[$-2C0A]0.0%'
+_XL_NAVY = "102250"; _XL_GREY = "6C6D6D"; _XL_WHITE = "FFFFFF"
+_XL_DARK = "22263A"; _XL_NAVYSOFT = "E8ECF5"; _XL_ZEBRA = "F3F5FA"
+_XL_NRULE = Side(style="thin", color=_XL_NAVY)
+
+
+def _xl_setup_sheet(ws, report_name, periodo, ncols):
+    """Encabezado de marca + ajuste de página + sin grilla."""
+    try:
+        img = _XLImage("logo.png"); img.width = 52; img.height = 52
+        ws.add_image(img, "A1")
+    except Exception:
+        pass
+    ws.merge_cells(start_row=1, start_column=1, end_row=3, end_column=1)
+    last = _col(ncols)
+    for r in (1, 2, 3):
+        ws.merge_cells(f"B{r}:{last}{r}")
+    ws["B1"] = "WL HNOS & ASOC"
+    ws["B1"].font = Font(name=_XL_FONT, size=14, bold=True, color=_XL_NAVY)
+    ws["B1"].alignment = Alignment(vertical="center")
+    ws["B2"] = report_name
+    ws["B2"].font = Font(name=_XL_FONT, size=11, bold=True, color=_XL_DARK)
+    ws["B3"] = f"Período: {periodo}   ·   Emitido: {date.today().strftime('%d/%m/%Y')}"
+    ws["B3"].font = Font(name=_XL_FONT, size=9, color=_XL_GREY)
+    ws.row_dimensions[1].height = 20
+    ws.row_dimensions[2].height = 17
+    ws.row_dimensions[3].height = 15
+    ws.row_dimensions[4].height = 6
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 9
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = ws.page_margins.bottom = 0.5
+
+
+def _xl_table_header(ws, row, headers):
+    for i, h in enumerate(headers):
+        c = ws.cell(row=row, column=1 + i, value=h)
+        c.font = Font(name=_XL_FONT, size=10, bold=True, color=_XL_WHITE)
+        c.fill = PatternFill("solid", fgColor=_XL_NAVY)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = Border(bottom=_XL_NRULE)
+    ws.row_dimensions[row].height = 24
+
+
+def _xl_money(ws, row, col, val, bold=False, fill=None, top=False):
+    c = ws.cell(row=row, column=col, value=float(val))
+    c.number_format = _XL_MONEY
+    c.font = Font(name=_XL_FONT, size=10, bold=bold, color=(_XL_NAVY if bold else _XL_DARK))
+    c.alignment = Alignment(horizontal="right")
+    if fill:
+        c.fill = PatternFill("solid", fgColor=fill)
+    if top:
+        c.border = Border(top=_XL_NRULE)
+    return c
+
+
+def _xl_text(ws, row, col, val, bold=False, color=None, fill=None,
+             align="left", size=10, italic=False, top=False):
+    c = ws.cell(row=row, column=col, value=val)
+    c.font = Font(name=_XL_FONT, size=size, bold=bold, italic=italic,
+                  color=(color or _XL_DARK))
+    c.alignment = Alignment(horizontal=align, vertical="center")
+    if fill:
+        c.fill = PatternFill("solid", fgColor=fill)
+    if top:
+        c.border = Border(top=_XL_NRULE)
+    return c
+
+
+def _xl_footer(ws, row, ncols):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+    c = ws.cell(row=row, column=1,
+                value=("WL HNOS & ASOC   ·   wlhnos.vercel.app   ·   "
+                       f"Reporte generado el {date.today().strftime('%d/%m/%Y')}"))
+    c.font = Font(name=_XL_FONT, size=8, italic=True, color=_XL_GREY)
+    c.alignment = Alignment(horizontal="left")
+
+
+_ORDEN_TIPOS = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
+
+
+def build_xlsx_movimientos(df, periodo):
+    """Workbook de marca con dos hojas: Resumen por categoría + Detalle.
+    df: columnas fecha_devengo, inicio_pago, tipo, categoria, concepto,
+    monto_total, cuotas. Montos como números reales."""
+    wb = Workbook()
+
+    # ---------- Hoja 1: Resumen por categoría ----------
+    ws = wb.active; ws.title = "Resumen por categoría"
+    _xl_setup_sheet(ws, "Movimientos por categoría · Resumen", periodo, 4)
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 12
+    HR = 5
+    _xl_table_header(ws, HR, ["Tipo", "Categoría", "Total", "% del tipo"])
+    ws.freeze_panes = f"A{HR + 1}"
+    resumen = df.groupby(["tipo", "categoria"], as_index=False)["monto_total"].sum()
+    r = HR + 1
+    for tipo in _ORDEN_TIPOS:
+        grp = resumen[resumen["tipo"] == tipo].sort_values("monto_total", ascending=False)
+        if grp.empty:
+            continue
+        sub = float(grp["monto_total"].sum())
+        for _, row_ in grp.iterrows():
+            _xl_text(ws, r, 1, tipo, color=_XL_GREY)
+            _xl_text(ws, r, 2, row_["categoria"])
+            _xl_money(ws, r, 3, float(row_["monto_total"]))
+            pc = ws.cell(row=r, column=4,
+                         value=(float(row_["monto_total"]) / sub if sub else 0))
+            pc.number_format = _XL_PCT
+            pc.font = Font(name=_XL_FONT, size=10, color=_XL_DARK)
+            pc.alignment = Alignment(horizontal="right")
+            r += 1
+        ws.merge_cells(f"A{r}:B{r}")
+        _xl_text(ws, r, 1, f"Subtotal {tipo}", bold=True, color=_XL_NAVY,
+                 fill=_XL_NAVYSOFT, top=True)
+        _xl_text(ws, r, 2, None, fill=_XL_NAVYSOFT, top=True)
+        _xl_money(ws, r, 3, sub, bold=True, fill=_XL_NAVYSOFT, top=True)
+        d = ws.cell(row=r, column=4, value=1.0); d.number_format = _XL_PCT
+        d.font = Font(name=_XL_FONT, size=10, bold=True, color=_XL_NAVY)
+        d.alignment = Alignment(horizontal="right")
+        d.fill = PatternFill("solid", fgColor=_XL_NAVYSOFT)
+        d.border = Border(top=_XL_NRULE)
+        r += 1
+    _xl_footer(ws, r + 1, 4)
+
+    # ---------- Hoja 2: Detalle de movimientos ----------
+    ws2 = wb.create_sheet("Detalle de movimientos")
+    _xl_setup_sheet(ws2, "Movimientos por categoría · Detalle", periodo, 7)
+    for i, w in enumerate([12, 14, 20, 26, 16, 8, 13]):
+        ws2.column_dimensions[_col(i + 1)].width = w
+    HR2 = 5
+    _xl_table_header(ws2, HR2, ["Fecha", "Tipo", "Categoría", "Concepto",
+                                "Monto", "Cuotas", "Inicio pago"])
+    ws2.freeze_panes = f"A{HR2 + 1}"
+    dd = df.copy()
+    dd["__ord"] = dd["tipo"].map({t: i for i, t in enumerate(_ORDEN_TIPOS)}).fillna(99)
+    dd = dd.sort_values(["__ord", "categoria", "fecha_devengo"])
+    r = HR2 + 1
+    z = 0
+    for _, m in dd.iterrows():
+        fill = _XL_ZEBRA if z % 2 == 1 else None
+        _xl_text(ws2, r, 1, pd.to_datetime(m["fecha_devengo"]).strftime("%d/%m/%Y"), fill=fill)
+        _xl_text(ws2, r, 2, m["tipo"], color=_XL_GREY, fill=fill)
+        _xl_text(ws2, r, 3, m["categoria"], fill=fill)
+        _xl_text(ws2, r, 4, (m["concepto"] or ""), fill=fill)
+        _xl_money(ws2, r, 5, float(m["monto_total"]), fill=fill)
+        _xl_text(ws2, r, 6, int(m["cuotas"]), align="center", fill=fill)
+        _xl_text(ws2, r, 7, pd.to_datetime(m["inicio_pago"]).strftime("%d/%m/%Y"),
+                 align="center", fill=fill)
+        r += 1; z += 1
+    # Totales separados por tipo
+    r += 1
+    _xl_text(ws2, r, 1, "Totales por tipo", bold=True, color=_XL_NAVY)
+    r += 1
+    primero = True
+    for tipo in _ORDEN_TIPOS:
+        sub_df = dd[dd["tipo"] == tipo]
+        if sub_df.empty:
+            continue
+        ws2.merge_cells(f"A{r}:D{r}")
+        _xl_text(ws2, r, 1, f"Total {tipo}", bold=True, color=_XL_DARK, top=primero)
+        for cc in (2, 3, 4):
+            ws2.cell(row=r, column=cc).border = Border(top=_XL_NRULE) if primero else Border()
+        _xl_money(ws2, r, 5, float(sub_df["monto_total"].sum()), bold=True, top=primero)
+        primero = False
+        r += 1
+    _xl_footer(ws2, r + 1, 7)
+
+    out = io.BytesIO(); wb.save(out); return out.getvalue()
+
+
+def build_xlsx_flujo(pivot_final, periodo):
+    """Workbook de marca con el Flujo de Fondos (matriz concepto x mes).
+    pivot_final: index = conceptos, columns = etiquetas de mes (str), floats."""
+    wb = Workbook(); ws = wb.active; ws.title = "Flujo de Fondos"
+    meses = list(pivot_final.columns)
+    ncols = 1 + len(meses)
+    _xl_setup_sheet(ws, "Flujo de Fondos · Criterio caja", periodo, ncols)
+    ws.column_dimensions["A"].width = 22
+    for i in range(len(meses)):
+        ws.column_dimensions[_col(2 + i)].width = 16
+    HR = 5
+    _xl_table_header(ws, HR, ["Concepto"] + [str(m) for m in meses])
+    ws.freeze_panes = f"B{HR + 1}"
+    bold_rows = {"Saldo inicial", "Flujo neto", "Saldo final"}
+    fill_rows = {"Saldo inicial", "Saldo final"}
+    r = HR + 1
+    for concepto in pivot_final.index:
+        is_bold = concepto in bold_rows
+        fill = _XL_NAVYSOFT if concepto in fill_rows else None
+        top = concepto in ("Flujo neto", "Saldo final")
+        _xl_text(ws, r, 1, str(concepto), bold=is_bold,
+                 color=(_XL_NAVY if is_bold else _XL_DARK), fill=fill, top=top)
+        for ci, m in enumerate(meses):
+            _xl_money(ws, r, 2 + ci, float(pivot_final.loc[concepto, m]),
+                      bold=is_bold, fill=fill, top=top)
+        r += 1
+    _xl_footer(ws, r + 1, ncols)
+    out = io.BytesIO(); wb.save(out); return out.getvalue()
 
 def _default_mes_idx(meses_ts):
     """Índice del mes en curso en la lista; si no está, el mes más reciente
@@ -1582,6 +1793,24 @@ def page_ver(user):
                        "Monto", "Cuotas", "Inicio pago"]
     st.dataframe(df_view, hide_index=True, use_container_width=True)
 
+    # --- Exportar a Excel (respeta los filtros activos) ---
+    _partes = [f"Mes: {mes_f}" if mes_f != "Todos" else "Todos los meses"]
+    if tipo_f != "Todos":
+        _partes.append(f"Tipo: {tipo_f}")
+    if cat_f != "Todas":
+        _partes.append(f"Categoría: {cat_f}")
+    _periodo_lbl = "   ·   ".join(_partes)
+    try:
+        _xlsx_mov = build_xlsx_movimientos(df, _periodo_lbl)
+        st.download_button(
+            "Descargar Excel (Resumen + Detalle)",
+            data=_xlsx_mov,
+            file_name="movimientos_por_categoria.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        st.caption(f"No se pudo generar el Excel: {e}")
+
     st.divider()
     st.markdown("##### Editar / Eliminar")
 
@@ -1778,17 +2007,6 @@ def _reporte_resultados(user):
     detalle["Monto"] = detalle["Monto"].apply(fmt_money)
     st.dataframe(detalle, hide_index=True, use_container_width=True)
 
-    excel = df_to_excel_bytes({
-        "Estado de Resultados": pivot.reset_index(),
-        "Detalle": detalle,
-    })
-    st.download_button(
-        "Descargar Estado de Resultados (Excel)",
-        data=excel,
-        file_name="estado_resultados.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
 # ============================================================================
 # PANTALLA: FLUJO DE FONDOS
 # ============================================================================
@@ -1980,16 +2198,17 @@ def _reporte_flujo(user):
     df_mes.columns = ["Tipo", "Categoría", "Concepto", "Cuota", "Monto"]
     st.dataframe(df_mes, hide_index=True, use_container_width=True)
 
-    excel = df_to_excel_bytes({
-        "Flujo de Fondos": pivot_final.reset_index(),
-        "Detalle cuotas": df_mes,
-    })
-    st.download_button(
-        "Descargar Flujo de Fondos (Excel)",
-        data=excel,
-        file_name="flujo_de_fondos.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    _periodo_ff = f"{desde.strftime('%m/%Y')} a {hasta.strftime('%m/%Y')}"
+    try:
+        _xlsx_ff = build_xlsx_flujo(pivot_final, _periodo_ff)
+        st.download_button(
+            "Descargar Flujo de Fondos (Excel)",
+            data=_xlsx_ff,
+            file_name="flujo_de_fondos.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        st.caption(f"No se pudo generar el Excel: {e}")
 
 # ============================================================================
 # PANTALLA: REPORTES (Estado de Resultados + Flujo de Fondos)
@@ -2033,9 +2252,37 @@ def _footer_sesion(user):
             do_signout()
 
 def page_configuracion(user):
-    page_header("Configuración de categorías",
-                "Las categorías se usan al cargar movimientos. Si desactivás una, "
-                "deja de aparecer en el selector pero los movimientos viejos se conservan.")
+    page_header("Configuración",
+                "Tu nombre y las categorías que usás al cargar movimientos.")
+
+    # ---- Tu nombre (cómo te saluda la app) ----
+    st.markdown("##### Tu nombre")
+    st.caption("Es el nombre con el que te saluda la app. Si lo dejás vacío, usa tu mail.")
+    _meta = getattr(user, "user_metadata", None) or {}
+    _nombre_actual = (_meta.get("display_name") or "").strip()
+    _cn, _cb = st.columns([3, 1])
+    with _cn:
+        _nuevo_nombre = st.text_input(
+            "Nombre", value=_nombre_actual, max_chars=40,
+            placeholder="Ej: Luciano / Estudio WL",
+            label_visibility="collapsed", key="cfg_display_name",
+        )
+    with _cb:
+        _guardar_nombre = st.button("Guardar", use_container_width=True, key="cfg_save_name")
+    if _guardar_nombre:
+        try:
+            _resp = sb.auth.update_user({"data": {"display_name": (_nuevo_nombre or "").strip()}})
+            if _resp and getattr(_resp, "user", None):
+                st.session_state.user = _resp.user
+            st.success("Nombre actualizado.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"No se pudo guardar: {e}")
+
+    st.divider()
+    st.markdown("##### Categorías")
+    st.caption("Si desactivás una categoría deja de aparecer en el selector, "
+               "pero los movimientos viejos se conservan.")
 
     tipo_sel = st.selectbox(
         "Tipo",
@@ -2178,7 +2425,12 @@ def _row_categoria(user, c, activa, conteos):
 # PANTALLA: INICIO (DEFAULT AL LOGUEARSE)
 # ============================================================================
 def _nombre_de_usuario(user):
-    """Devuelve la parte local del email como nombre amigable, con primera mayúscula."""
+    """Nombre para mostrar: usa el que configuró el usuario
+    (user_metadata.display_name); si no hay, lo deriva del email."""
+    meta = getattr(user, "user_metadata", None) or {}
+    nombre = (meta.get("display_name") or meta.get("nombre") or "").strip()
+    if nombre:
+        return nombre
     email = getattr(user, "email", "") or ""
     local = email.split("@")[0] if "@" in email else email
     # Si tiene puntos o guiones, capitalizamos cada parte
@@ -2324,10 +2576,6 @@ def _dashboard_body(user, estado):
         )
         st.divider()
 
-    # Ventana de meses para el gráfico de evolución (hasta 12, terminando en el mes elegido)
-    start_idx = max(0, mes_idx - 11)
-    meses_chart = meses_todos[start_idx:mes_idx + 1]
-
     # ------------------------------------------------------------------------
     # GRÁFICO 1: Composición por categoría (gastos + ahorro) con filtros propios
     # ------------------------------------------------------------------------
@@ -2395,91 +2643,24 @@ def _dashboard_body(user, estado):
             f"**{fmt_money(total_torta)}**"
         )
 
-    # ------------------------------------------------------------------------
-    # GRÁFICO 2: Evolución mensual con selector de serie
-    # (resuelve el problema de escala: cuando elegís una sola serie se autoescala bien)
-    # ------------------------------------------------------------------------
-    st.markdown("##### Evolución mensual")
-    serie_sel = st.radio(
-        "Mostrar",
-        options=["Resultado", "Ingresos", "Gastos", "Ahorro", "Todo"],
-        horizontal=True,
-        index=0,
-        key="dash_serie",
-    )
-
-    # Misma ventana de meses que el gráfico de saldo
-    fig_evol = go.Figure()
-    x_lbls = [m.strftime("%m/%Y") for m in meses_chart]
-
-    def serie_de(tipo):
-        return [safe_get(pivot_completo, tipo, m) for m in meses_chart]
-
-    def serie_gastos():
-        return [safe_get(pivot_completo, "Gasto Fijo", m)
-                + safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
-
-    def serie_resultado():
-        return [safe_get(pivot_completo, "Ingreso", m)
-                - safe_get(pivot_completo, "Gasto Fijo", m)
-                - safe_get(pivot_completo, "Gasto Variable", m) for m in meses_chart]
-
-    if serie_sel == "Resultado":
-        vals = serie_resultado()
-        colores = [GREEN if v >= 0 else RED for v in vals]
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=vals, name="Resultado",
-                                  marker_color=colores, marker_line_width=0))
-    elif serie_sel == "Ingresos":
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ingreso"),
-                                  name="Ingresos", marker_color=NAVY, marker_line_width=0))
-    elif serie_sel == "Gastos":
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_gastos(),
-                                  name="Gastos", marker_color=ORANGE, marker_line_width=0))
-    elif serie_sel == "Ahorro":
-        fig_evol.add_trace(go.Bar(x=x_lbls, y=serie_de("Ahorro"),
-                                  name="Ahorro", marker_color=CYAN, marker_line_width=0))
-    else:  # Todo
-        for tipo, color in [("Ingreso", NAVY), ("Gasto Fijo", ORANGE),
-                            ("Gasto Variable", "#f08259"), ("Ahorro", CYAN)]:
-            fig_evol.add_trace(go.Scatter(
-                x=x_lbls, y=serie_de(tipo), name=tipo,
-                mode="lines+markers",
-                line=dict(color=color, width=2.5),
-                marker=dict(size=7, color=color),
-            ))
-
-    fig_evol = aplicar_tema_plotly(fig_evol, height=320)
-    if serie_sel == "Todo":
-        st.caption(
-            "Las series están en la misma escala — si los ingresos son mucho mayores que "
-            "los gastos individuales, estos se ven aplastados contra el cero. "
-            "Para análisis detallado, elegí una serie a la vez."
-        )
-    st.plotly_chart(fig_evol, use_container_width=True, config={"displayModeBar": False})
-
 
 # ============================================================================
 # APP PRINCIPAL (LOGUEADO)
 # ============================================================================
 def app(user):
-    # Sidebar solo informativa (en mobile arranca colapsada y el botón para
-    # abrirla es poco confiable; la navegación vive en el cuerpo de la página).
-    with st.sidebar:
+    # Barra superior en el cuerpo (la sidebar se eliminó: era frágil y el logout
+    # quedaba atrapado al colapsarla). Logo + cuenta + cerrar sesión, siempre visibles.
+    col_l, col_r = st.columns([3, 2])
+    with col_l:
         if _logo_bytes:
-            st.image(_logo_bytes, width=120)
+            st.image(_logo_bytes, width=130)
+    with col_r:
         st.markdown(
-            f"<div style='color:{TEXT_MUTED}; font-size:0.78rem; margin-top:4px;'>"
-            f"WL HNOS &amp; ASOC"
-            f"</div>",
+            f"<div style='text-align:right; color:{TEXT_MUTED}; font-size:0.75rem; "
+            f"margin-top:8px; word-break:break-all; line-height:1.2;'>{user.email}</div>",
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f"<div style='margin:14px 0 6px; color:{NAVY}; font-weight:600; font-size:0.9rem;'>"
-            f"{user.email}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        if st.button("Cerrar sesión", use_container_width=True):
+        if st.button("Cerrar sesión", use_container_width=True, key="logout_top"):
             do_signout()
 
     # Navegación principal, siempre visible en cualquier pantalla.
@@ -2502,7 +2683,16 @@ def app(user):
         page_reportes(user)
     elif "Configuración" in page:
         page_configuracion(user)
-        _footer_sesion(user)
+
+    # Footer de marca con link a la landing
+    st.markdown(
+        f"<div style='text-align:center; margin-top:42px; padding-top:14px; "
+        f"border-top:1px solid {BORDER}; color:{TEXT_MUTED}; font-size:0.8rem;'>"
+        f"<a href='https://wlhnos.vercel.app/' target='_blank' "
+        f"style='color:{CYAN}; text-decoration:none; font-weight:600;'>WL HNOS &amp; ASOC</a>"
+        f" · Catamarca</div>",
+        unsafe_allow_html=True,
+    )
 
 # ============================================================================
 # ROUTER
