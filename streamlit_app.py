@@ -207,6 +207,7 @@ ICON_512_PATH = "icon-512.png"
 # CONFIGURACIÓN DE PÁGINA
 # ============================================================================
 _logo_bytes = load_logo_bytes(LOGO_PATH)
+_logo_simbolo = load_logo_bytes("logo.png")  # símbolo cuadrado, alta resolución (barra superior)
 _page_icon = "💰"
 if _logo_bytes:
     try:
@@ -2257,14 +2258,13 @@ def page_configuracion(user):
 
     # ---- Tu nombre (cómo te saluda la app) ----
     st.markdown("##### Tu nombre")
-    st.caption("Es el nombre con el que te saluda la app. Si lo dejás vacío, usa tu mail.")
     _meta = getattr(user, "user_metadata", None) or {}
     _nombre_actual = (_meta.get("display_name") or "").strip()
     _cn, _cb = st.columns([3, 1])
     with _cn:
         _nuevo_nombre = st.text_input(
             "Nombre", value=_nombre_actual, max_chars=40,
-            placeholder="Ej: Luciano / Estudio WL",
+            placeholder="Coloca tu nombre",
             label_visibility="collapsed", key="cfg_display_name",
         )
     with _cb:
@@ -2486,7 +2486,6 @@ def _dashboard_body(user, estado):
                   + safe_get(pivot_completo, "Gasto Variable", mes_sel))
     ahorro_mes = safe_get(pivot_completo, "Ahorro", mes_sel)
     resultado_mes = ingresos_mes - gastos_mes  # el Ahorro no es un gasto: se muestra aparte
-    saldo_fin_mes = float(saldos_fin[mes_sel])
 
     st.markdown(f"##### Mes: {mes_lbl_sel}")
     col1, col2, col3, col4 = st.columns(4)
@@ -2497,18 +2496,12 @@ def _dashboard_body(user, estado):
         st.markdown(metric_card("Gastos", fmt_money(gastos_mes), "orange"),
                     unsafe_allow_html=True)
     with col3:
-        st.markdown(metric_card("Ahorro", fmt_money(ahorro_mes), "cyan"),
+        color_res = "green" if resultado_mes >= 0 else "red"
+        st.markdown(metric_card("Resultado antes de ahorro", fmt_money(resultado_mes), color_res),
                     unsafe_allow_html=True)
     with col4:
-        color_res = "green" if resultado_mes >= 0 else "red"
-        st.markdown(metric_card("Resultado", fmt_money(resultado_mes), color_res),
+        st.markdown(metric_card("Ahorro", fmt_money(ahorro_mes), "cyan"),
                     unsafe_allow_html=True)
-
-    st.caption(
-        f"Saldo final estimado a fin de {mes_lbl_sel}: **{fmt_money(saldo_fin_mes)}** "
-        f"(criterio caja). Resultado = Ingresos − Gastos; el Ahorro se muestra aparte: "
-        f"igual sale de tu saldo, pero no es dinero perdido."
-    )
 
     st.divider()
 
@@ -2545,8 +2538,9 @@ def _dashboard_body(user, estado):
             st.markdown(metric_card("Disponible neto", fmt_money(neto),
                                     "" if neto >= 0 else "red"), unsafe_allow_html=True)
         st.caption(
-            "El comprometido son las cuotas de gastos ya cargadas que vencen en meses "
-            "futuros: ese dinero conviene tenerlo reservado, no gastarlo."
+            "El monto comprometido en cuotas futuras representa las cuotas que vencen "
+            "en meses futuros respecto al actual. Una vez que pasa el mes, ese monto se "
+            "actualiza asumiendo que las cuotas del período fueron abonadas."
         )
         st.divider()
 
@@ -2570,7 +2564,6 @@ def _dashboard_body(user, estado):
                                     fmt_money(gv_curso / dias_transc * dias_mes), "orange"),
                         unsafe_allow_html=True)
         st.caption(
-            f"Los fijos y el ahorro ya están definidos; el mes se juega en los variables. "
             f"Promedio = gasto variable acumulado dividido los {dias_transc} días "
             f"transcurridos. El proyectado asume que seguís a este ritmo."
         )
@@ -2631,10 +2624,11 @@ def _dashboard_body(user, estado):
         fig_torta.update_traces(
             textposition="outside",
             textinfo="label+percent",
+            automargin=True,
             marker=dict(line=dict(color="white", width=2)),
         )
-        fig_torta = aplicar_tema_plotly(fig_torta, height=470)
-        fig_torta.update_layout(margin=dict(t=40, b=40, l=10, r=10))
+        fig_torta = aplicar_tema_plotly(fig_torta, height=560)
+        fig_torta.update_layout(margin=dict(t=55, b=55, l=70, r=70))
         fig_torta.update_layout(showlegend=False)
         st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
         st.caption(
@@ -2648,20 +2642,19 @@ def _dashboard_body(user, estado):
 # APP PRINCIPAL (LOGUEADO)
 # ============================================================================
 def app(user):
-    # Barra superior en el cuerpo (la sidebar se eliminó: era frágil y el logout
-    # quedaba atrapado al colapsarla). Logo + cuenta + cerrar sesión, siempre visibles.
+    # Barra superior compacta: marca chica a la izquierda, cuenta a la derecha.
     col_l, col_r = st.columns([3, 2])
     with col_l:
-        if _logo_bytes:
-            st.image(_logo_bytes, width=130)
+        if _logo_simbolo:
+            st.image(_logo_simbolo, width=46)
     with col_r:
-        st.markdown(
-            f"<div style='text-align:right; color:{TEXT_MUTED}; font-size:0.75rem; "
-            f"margin-top:8px; word-break:break-all; line-height:1.2;'>{user.email}</div>",
-            unsafe_allow_html=True,
-        )
         if st.button("Cerrar sesión", use_container_width=True, key="logout_top"):
             do_signout()
+        st.markdown(
+            f"<div style='text-align:right; color:{TEXT_MUTED}; font-size:0.7rem; "
+            f"margin-top:3px; word-break:break-all;'>{user.email}</div>",
+            unsafe_allow_html=True,
+        )
 
     # Navegación principal, siempre visible en cualquier pantalla.
     page = st.radio("Menú", [
