@@ -1,0 +1,36 @@
+name: Keep app awake
+
+# Mantiene despierta la app de Streamlit visitandola con un navegador real cada
+# pocas horas. Corre el script keepalive.py. No toca la app ni el deploy.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # cada 6 h (00, 06, 12 y 18 UTC). Margen de sobra vs las 12 h de sueno.
+  workflow_dispatch:          # permite correrlo a mano desde la pestana "Actions"
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Si algun dia cambia la URL de la app, edita SOLO esta linea.
+      STREAMLIT_URL: https://finanzas-personales-app.streamlit.app
+    steps:
+      - name: Traer el repo (para leer keepalive.py)
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visitar y despertar la app
+        run: python keepalive.py
