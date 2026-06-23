@@ -1,5 +1,5 @@
 """
-Finanzas WL - App de finanzas personales
+Finanzas para Protagonistas - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
 Versión 4.3 — Auth parte 2: Google, sesión persistente y sidebar mobile
@@ -191,9 +191,10 @@ COLOR_TIPO = {
 # (RLS: el usuario LEE su fila pero NO la escribe; vos la seteás desde el panel).
 # Sin fila => gratis. Helpers es_premium() / _plan_usuario() más abajo.
 LIMITE_CATEGORIAS_PROPIAS_GRATIS = 5   # categorías propias (total) que permite el plan gratis
+LINK_WHATSAPP = "https://wa.link/cl8i7e"   # contacto para activar Premium (editable)
 MSG_PREMIUM = (
-    "🔒 Esta función es parte de **Premium**. "
-    "Escribinos a WL HNOS & ASOC para activarla."
+    f"🔒 Esta función es parte de **Premium**. "
+    f"[Escribinos por WhatsApp]({LINK_WHATSAPP}) y te la activamos."
 )
 
 # ============================================================================
@@ -231,7 +232,7 @@ if _logo_bytes:
         pass
 
 st.set_page_config(
-    page_title="Finanzas WL",
+    page_title="Finanzas para Protagonistas",
     page_icon=_page_icon,
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -271,7 +272,7 @@ def inject_pwa_meta():
             const parent = window.parent.document;
             const head = parent.head;
 
-            const manifestStr = '{{"name":"Finanzas WL","short_name":"Finanzas","start_url":".","display":"standalone","background_color":"#ffffff","theme_color":"#102250","icons":{manifest_icons}}}';
+            const manifestStr = '{{"name":"Finanzas para Protagonistas","short_name":"Finanzas","start_url":".","display":"standalone","background_color":"#ffffff","theme_color":"#102250","icons":{manifest_icons}}}';
             const manifestBlob = new Blob([manifestStr], {{type: 'application/manifest+json'}});
             const manifestURL = URL.createObjectURL(manifestBlob);
 
@@ -279,7 +280,7 @@ def inject_pwa_meta():
                 {{tag: 'meta', selector: 'meta[name="apple-mobile-web-app-capable"]', attrs: {{name: 'apple-mobile-web-app-capable', content: 'yes'}}}},
                 {{tag: 'meta', selector: 'meta[name="mobile-web-app-capable"]', attrs: {{name: 'mobile-web-app-capable', content: 'yes'}}}},
                 {{tag: 'meta', selector: 'meta[name="apple-mobile-web-app-status-bar-style"]', attrs: {{name: 'apple-mobile-web-app-status-bar-style', content: 'default'}}}},
-                {{tag: 'meta', selector: 'meta[name="apple-mobile-web-app-title"]', attrs: {{name: 'apple-mobile-web-app-title', content: 'Finanzas WL'}}}},
+                {{tag: 'meta', selector: 'meta[name="apple-mobile-web-app-title"]', attrs: {{name: 'apple-mobile-web-app-title', content: 'Finanzas'}}}},
                 {{tag: 'meta', selector: 'meta[name="theme-color"]', attrs: {{name: 'theme-color', content: '#102250'}}}},
                 {{tag: 'link', selector: 'link[rel="manifest"]', attrs: {{rel: 'manifest', href: manifestURL}}}},
                 {{tag: 'link', selector: 'link[rel="apple-touch-icon"]', attrs: {{rel: 'apple-touch-icon', href: '{apple_touch_icon}'}}}},
@@ -1498,7 +1499,7 @@ def page_login():
 
     st.markdown(
         "<div style='text-align:center; margin-top:8px;'>"
-        "<h1 style='margin-bottom:4px;'>Finanzas para protagonistas</h1>"
+        "<h1 style='margin-bottom:4px;'>Finanzas para Protagonistas</h1>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
         "Tus finanzas desde un solo lugar"
         "</div></div>",
@@ -2356,6 +2357,23 @@ def page_configuracion(user):
     page_header("Configuración",
                 "Tu nombre y las categorías que usás al cargar movimientos.")
 
+    # ---- Plan (estado actual + beneficios de Premium) ----
+    _es_prem_cfg = es_premium(user)
+    if _es_prem_cfg:
+        st.markdown("##### Tu plan: Premium ✨")
+        st.caption("Tenés acceso completo a todas las funciones. ¡Gracias por acompañar!")
+    else:
+        st.markdown("##### Tu plan: Gratis")
+        st.markdown(
+            "**Con Premium desbloqueás:**\n\n"
+            "- Reportes Excel de marca (Movimientos y Flujo de Fondos)\n"
+            "- Control total de categorías: renombrar, desactivar y sin límite\n"
+            "- Análisis de historial largo *(próximamente)*"
+        )
+        st.link_button("Activar Premium por WhatsApp", LINK_WHATSAPP,
+                       use_container_width=True)
+    st.divider()
+
     # ---- Tu nombre (cómo te saluda la app) ----
     st.markdown("##### Tu nombre")
     _meta = getattr(user, "user_metadata", None) or {}
@@ -2511,6 +2529,7 @@ def _row_categoria(user, c, activa, conteos, premium):
                 st.session_state.pop(edit_key, None)
                 st.rerun()
     else:
+        bloqueado_premium = False
         col1, col2, col3 = st.columns([4, 1, 1])
         with col1:
             afectados = conteos.get(nombre_actual, 0)
@@ -2527,13 +2546,13 @@ def _row_categoria(user, c, activa, conteos, premium):
                     st.session_state[edit_key] = True
                     st.rerun()
                 else:
-                    st.info(MSG_PREMIUM)
+                    bloqueado_premium = True
         with col3:
             if activa:
                 if st.button("🚫", key=f"btn_desact_{cat_id}", help="Desactivar",
                              use_container_width=True):
                     if not premium:
-                        st.info(MSG_PREMIUM)
+                        bloqueado_premium = True
                     else:
                         try:
                             update_categoria(user.id, cat_id, activa=False)
@@ -2545,7 +2564,7 @@ def _row_categoria(user, c, activa, conteos, premium):
                 if st.button("✅", key=f"btn_react_{cat_id}", help="Reactivar",
                              use_container_width=True):
                     if not premium:
-                        st.info(MSG_PREMIUM)
+                        bloqueado_premium = True
                     else:
                         try:
                             update_categoria(user.id, cat_id, activa=True)
@@ -2553,6 +2572,10 @@ def _row_categoria(user, c, activa, conteos, premium):
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error: {e}")
+        # El mensaje de candado se muestra a TODO el ancho, debajo de la fila
+        # (si fuera dentro de col2/col3 el texto cae casi a una letra por renglón).
+        if bloqueado_premium:
+            st.info(MSG_PREMIUM)
 
 # ============================================================================
 # PANTALLA: INICIO (DEFAULT AL LOGUEARSE)
@@ -2787,8 +2810,8 @@ def app(user):
             f"<div style='display:flex; align-items:center; gap:11px; padding-top:2px;'>"
             f"<img src='{_LOGO_DATA_URI}' width='44' height='44' style='display:block; flex:0 0 auto;'/>"
             f"<div style='line-height:1.1;'>"
-            f"<div style='font-family:Poppins,sans-serif; font-weight:700; font-size:1.15rem; "
-            f"color:{NAVY}; letter-spacing:-0.01em;'>Finanzas <span style='color:{CYAN};'>WL</span></div>"
+            f"<div style='font-family:Poppins,sans-serif; font-weight:700; font-size:1.05rem; "
+            f"color:{NAVY}; letter-spacing:-0.01em;'>Finanzas para <span style='color:{CYAN};'>Protagonistas</span></div>"
             f"<div style='font-size:0.62rem; color:{TEXT_MUTED}; letter-spacing:0.1em; "
             f"text-transform:uppercase; margin-top:1px;'>WL HNOS &amp; ASOC</div>"
             f"</div></div>",
@@ -2800,6 +2823,16 @@ def app(user):
         st.markdown(
             f"<div style='text-align:right; color:{TEXT_MUTED}; font-size:0.72rem; "
             f"margin-top:4px; word-break:break-all;'>{user.email}</div>",
+            unsafe_allow_html=True,
+        )
+        _es_prem = es_premium(user)
+        _plan_lbl = "Premium" if _es_prem else "Gratis"
+        _plan_bg = CYAN if _es_prem else GREY
+        st.markdown(
+            f"<div style='text-align:right; margin-top:5px;'>"
+            f"<span style='background:{_plan_bg}; color:#fff; font-size:0.62rem; font-weight:700; "
+            f"letter-spacing:0.06em; padding:2px 9px; border-radius:999px; "
+            f"text-transform:uppercase;'>{_plan_lbl}</span></div>",
             unsafe_allow_html=True,
         )
 
