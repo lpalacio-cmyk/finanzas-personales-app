@@ -185,6 +185,18 @@ COLOR_TIPO = {
 }
 
 # ============================================================================
+# PLANES (FREEMIUM)
+# ============================================================================
+# El plan de cada usuario se guarda en la tabla `suscripciones` de Supabase
+# (RLS: el usuario LEE su fila pero NO la escribe; vos la seteás desde el panel).
+# Sin fila => gratis. Helpers es_premium() / _plan_usuario() más abajo.
+LIMITE_CATEGORIAS_PROPIAS_GRATIS = 5   # categorías propias (total) que permite el plan gratis
+MSG_PREMIUM = (
+    "🔒 Esta función es parte de **Premium**. "
+    "Escribinos a WL HNOS & ASOC para activarla."
+)
+
+# ============================================================================
 # CARGA DE LOGO (cached)
 # ============================================================================
 @st.cache_data(show_spinner=False)
@@ -725,6 +737,52 @@ def do_signout():
     st.rerun()
 
 # ============================================================================
+# ACCESO A DATOS: PLAN / SUSCRIPCIÓN
+# ============================================================================
+@st.cache_data(ttl=30, show_spinner=False)
+def _plan_usuario(user_id: str) -> dict:
+    """Lee la suscripción del usuario. Sin fila (o si falla la consulta) => gratis.
+    A prueba de fallos: nunca rompe la app ni regala Premium por error, así que
+    el .py se puede pegar aun antes de crear la tabla en Supabase."""
+    try:
+        res = (
+            sb.table("suscripciones").select("plan, vence")
+            .eq("user_id", user_id).limit(1).execute().data
+        )
+        if not res:
+            return {"plan": "gratis", "vence": None}
+        fila = res[0]
+        return {
+            "plan": (fila.get("plan") or "gratis").strip().lower(),
+            "vence": fila.get("vence"),
+        }
+    except Exception:
+        return {"plan": "gratis", "vence": None}
+
+def es_premium(user) -> bool:
+    """True solo si el usuario tiene plan 'premium' vigente (sin vencimiento, o
+    con vencimiento en el futuro)."""
+    if user is None:
+        return False
+    info = _plan_usuario(user.id)
+    if info.get("plan") != "premium":
+        return False
+    vence = info.get("vence")
+    if not vence:
+        return True
+    try:
+        return pd.to_datetime(vence).date() >= date.today()
+    except Exception:
+        return True
+
+def boton_premium(label: str, key: str):
+    """Botón visible con candado para una función Premium. Al tocarlo promociona
+    el plan en vez de ejecutar la acción."""
+    if st.button(f"🔒 {label}", key=key):
+        st.info(MSG_PREMIUM)
+
+
+# ============================================================================
 # ACCESO A DATOS: CATEGORÍAS
 # ============================================================================
 CATEGORIAS_DEFAULT = {
@@ -851,6 +909,15 @@ def conteo_movs_por_categoria(user_id: str, tipo: str) -> dict:
     for r in res:
         out[r["categoria"]] = out.get(r["categoria"], 0) + 1
     return out
+
+def contar_categorias_propias(user_id: str) -> int:
+    """Cantidad de categorías creadas por el usuario (las que NO pertenecen al set
+    por defecto), sumando todos los tipos. Sirve para el límite del plan gratis."""
+    todas = get_categorias(user_id, solo_activas=False)  # todos los tipos
+    return sum(
+        1 for c in todas
+        if c["nombre"] not in CATEGORIAS_DEFAULT.get(c["tipo"], [])
+    )
 
 # ============================================================================
 # ACCESO A DATOS: MOVIMIENTOS
@@ -1820,23 +1887,26 @@ def page_ver(user):
                        "Monto", "Cuotas", "Inicio pago"]
     st.dataframe(df_view, hide_index=True, use_container_width=True)
 
-    # --- Exportar a Excel (respeta los filtros activos) ---
-    _partes = [f"Mes: {mes_f}" if mes_f != "Todos" else "Todos los meses"]
-    if tipo_f != "Todos":
-        _partes.append(f"Tipo: {tipo_f}")
-    if cat_f != "Todas":
-        _partes.append(f"Categoría: {cat_f}")
-    _periodo_lbl = "   ·   ".join(_partes)
-    try:
-        _xlsx_mov = build_xlsx_movimientos(df, _periodo_lbl)
-        st.download_button(
-            "Descargar Excel (Resumen + Detalle)",
-            data=_xlsx_mov,
-            file_name="movimientos_por_categoria.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    except Exception as e:
-        st.caption(f"No se pudo generar el Excel: {e}")
+    # --- Exportar a Excel (respeta los filtros activos) ---  [PREMIUM]
+    if es_premium(user):
+        _partes = [f"Mes: {mes_f}" if mes_f != "Todos" else "Todos los meses"]
+        if tipo_f != "Todos":
+            _partes.append(f"Tipo: {tipo_f}")
+        if cat_f != "Todas":
+            _partes.append(f"Categoría: {cat_f}")
+        _periodo_lbl = "   ·   ".join(_partes)
+        try:
+            _xlsx_mov = build_xlsx_movimientos(df, _periodo_lbl)
+            st.download_button(
+                "Descargar Excel (Resumen + Detalle)",
+                data=_xlsx_mov,
+                file_name="movimientos_por_categoria.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.caption(f"No se pudo generar el Excel: {e}")
+    else:
+        boton_premium("Descargar Excel (Resumen + Detalle)", key="lock_xlsx_mov")
 
     st.divider()
     st.markdown("##### Editar / Eliminar")
@@ -2225,17 +2295,21 @@ def _reporte_flujo(user):
     df_mes.columns = ["Tipo", "Categoría", "Concepto", "Cuota", "Monto"]
     st.dataframe(df_mes, hide_index=True, use_container_width=True)
 
-    _periodo_ff = f"{desde.strftime('%m/%Y')} a {hasta.strftime('%m/%Y')}"
-    try:
-        _xlsx_ff = build_xlsx_flujo(pivot_final, _periodo_ff)
-        st.download_button(
-            "Descargar Flujo de Fondos (Excel)",
-            data=_xlsx_ff,
-            file_name="flujo_de_fondos.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    except Exception as e:
-        st.caption(f"No se pudo generar el Excel: {e}")
+    # [PREMIUM] Descarga del Flujo de Fondos en Excel
+    if es_premium(user):
+        _periodo_ff = f"{desde.strftime('%m/%Y')} a {hasta.strftime('%m/%Y')}"
+        try:
+            _xlsx_ff = build_xlsx_flujo(pivot_final, _periodo_ff)
+            st.download_button(
+                "Descargar Flujo de Fondos (Excel)",
+                data=_xlsx_ff,
+                file_name="flujo_de_fondos.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.caption(f"No se pudo generar el Excel: {e}")
+    else:
+        boton_premium("Descargar Flujo de Fondos (Excel)", key="lock_xlsx_ff")
 
 # ============================================================================
 # PANTALLA: REPORTES (Estado de Resultados + Flujo de Fondos)
@@ -2310,37 +2384,61 @@ def page_configuracion(user):
     st.caption("Si desactivás una categoría deja de aparecer en el selector, "
                "pero los movimientos viejos se conservan.")
 
+    # [PLANES] Plan del usuario y cuántas categorías propias lleva creadas.
+    premium = es_premium(user)
+    propias = contar_categorias_propias(user.id)
+    if not premium:
+        st.caption(
+            f"🔒 Plan gratis: podés crear hasta {LIMITE_CATEGORIAS_PROPIAS_GRATIS} "
+            f"categorías propias en total ({propias} usadas). Renombrar, desactivar "
+            f"y categorías ilimitadas son parte de **Premium**."
+        )
+
     tipo_sel = st.selectbox(
         "Tipo",
         ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"],
         key="cfg_tipo",
     )
 
-    with st.form(f"nueva_cat_{tipo_sel}", clear_on_submit=True):
+    _puede_agregar = premium or propias < LIMITE_CATEGORIAS_PROPIAS_GRATIS
+    if _puede_agregar:
+        with st.form(f"nueva_cat_{tipo_sel}", clear_on_submit=True):
+            st.markdown("##### Agregar categoría")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                nuevo_nombre = st.text_input(
+                    "Nombre",
+                    placeholder=f"Ej: Internet (categoría {tipo_sel.lower()})",
+                    label_visibility="collapsed",
+                )
+            with col2:
+                ok_nueva = st.form_submit_button("Agregar", use_container_width=True)
+            if ok_nueva:
+                n = (nuevo_nombre or "").strip()
+                if not n:
+                    st.error("Ingresá un nombre")
+                elif categoria_existe(user.id, n, tipo_sel):
+                    st.error(f"Ya existe la categoría '{n}' para tipo {tipo_sel}")
+                elif (not premium
+                      and contar_categorias_propias(user.id) >= LIMITE_CATEGORIAS_PROPIAS_GRATIS):
+                    st.warning(
+                        f"Llegaste al límite de {LIMITE_CATEGORIAS_PROPIAS_GRATIS} "
+                        f"categorías propias del plan gratis."
+                    )
+                else:
+                    try:
+                        insert_categoria(user.id, n, tipo_sel)
+                        st.success(f"Categoría '{n}' creada")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+    else:
         st.markdown("##### Agregar categoría")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            nuevo_nombre = st.text_input(
-                "Nombre",
-                placeholder=f"Ej: Internet (categoría {tipo_sel.lower()})",
-                label_visibility="collapsed",
-            )
-        with col2:
-            ok_nueva = st.form_submit_button("Agregar", use_container_width=True)
-        if ok_nueva:
-            n = (nuevo_nombre or "").strip()
-            if not n:
-                st.error("Ingresá un nombre")
-            elif categoria_existe(user.id, n, tipo_sel):
-                st.error(f"Ya existe la categoría '{n}' para tipo {tipo_sel}")
-            else:
-                try:
-                    insert_categoria(user.id, n, tipo_sel)
-                    st.success(f"Categoría '{n}' creada")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+        st.info(
+            f"Llegaste al límite de {LIMITE_CATEGORIAS_PROPIAS_GRATIS} categorías "
+            f"propias del plan gratis. Con **Premium** son ilimitadas. {MSG_PREMIUM}"
+        )
 
     st.divider()
 
@@ -2357,15 +2455,15 @@ def page_configuracion(user):
     if not cats_activas:
         st.caption("No hay categorías activas.")
     for c in cats_activas:
-        _row_categoria(user, c, activa=True, conteos=conteos)
+        _row_categoria(user, c, activa=True, conteos=conteos, premium=premium)
 
     if cats_inactivas:
         with st.expander(f"Inactivas ({len(cats_inactivas)})"):
             for c in cats_inactivas:
-                _row_categoria(user, c, activa=False, conteos=conteos)
+                _row_categoria(user, c, activa=False, conteos=conteos, premium=premium)
 
 
-def _row_categoria(user, c, activa, conteos):
+def _row_categoria(user, c, activa, conteos, premium):
     cat_id = c["id"]
     nombre_actual = c["nombre"]
     tipo_actual = c["tipo"]
@@ -2425,27 +2523,36 @@ def _row_categoria(user, c, activa, conteos):
         with col2:
             if st.button("✏️", key=f"btn_edit_{cat_id}", help="Renombrar",
                          use_container_width=True):
-                st.session_state[edit_key] = True
-                st.rerun()
+                if premium:
+                    st.session_state[edit_key] = True
+                    st.rerun()
+                else:
+                    st.info(MSG_PREMIUM)
         with col3:
             if activa:
                 if st.button("🚫", key=f"btn_desact_{cat_id}", help="Desactivar",
                              use_container_width=True):
-                    try:
-                        update_categoria(user.id, cat_id, activa=False)
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                    if not premium:
+                        st.info(MSG_PREMIUM)
+                    else:
+                        try:
+                            update_categoria(user.id, cat_id, activa=False)
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
             else:
                 if st.button("✅", key=f"btn_react_{cat_id}", help="Reactivar",
                              use_container_width=True):
-                    try:
-                        update_categoria(user.id, cat_id, activa=True)
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                    if not premium:
+                        st.info(MSG_PREMIUM)
+                    else:
+                        try:
+                            update_categoria(user.id, cat_id, activa=True)
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
 
 # ============================================================================
 # PANTALLA: INICIO (DEFAULT AL LOGUEARSE)
