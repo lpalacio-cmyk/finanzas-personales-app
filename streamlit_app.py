@@ -193,8 +193,8 @@ COLOR_TIPO = {
 LIMITE_CATEGORIAS_PROPIAS_GRATIS = 5   # categorías propias (total) que permite el plan gratis
 LINK_WHATSAPP = "https://wa.link/cl8i7e"   # contacto para activar Premium (editable)
 MSG_PREMIUM = (
-    f"🔒 Esta función es parte de **Premium**. "
-    f"[Escribinos por WhatsApp]({LINK_WHATSAPP}) y te la activamos."
+    f"🔒 Esta función es parte del **Plan Premium**. "
+    f"[Escribinos y activá tu plan]({LINK_WHATSAPP})."
 )
 
 # ============================================================================
@@ -2357,23 +2357,6 @@ def page_configuracion(user):
     page_header("Configuración",
                 "Tu nombre y las categorías que usás al cargar movimientos.")
 
-    # ---- Plan (estado actual + beneficios de Premium) ----
-    _es_prem_cfg = es_premium(user)
-    if _es_prem_cfg:
-        st.markdown("##### Tu plan: Premium ✨")
-        st.caption("Tenés acceso completo a todas las funciones. ¡Gracias por acompañar!")
-    else:
-        st.markdown("##### Tu plan: Gratis")
-        st.markdown(
-            "**Con Premium desbloqueás:**\n\n"
-            "- Reportes Excel de marca (Movimientos y Flujo de Fondos)\n"
-            "- Control total de categorías: renombrar, desactivar y sin límite\n"
-            "- Análisis de historial largo *(próximamente)*"
-        )
-        st.link_button("Activar Premium por WhatsApp", LINK_WHATSAPP,
-                       use_container_width=True)
-    st.divider()
-
     # ---- Tu nombre (cómo te saluda la app) ----
     st.markdown("##### Tu nombre")
     _meta = getattr(user, "user_metadata", None) or {}
@@ -2407,9 +2390,9 @@ def page_configuracion(user):
     propias = contar_categorias_propias(user.id)
     if not premium:
         st.caption(
-            f"🔒 Plan gratis: podés crear hasta {LIMITE_CATEGORIAS_PROPIAS_GRATIS} "
+            f"🔒 Plan Gratuito: podés crear hasta {LIMITE_CATEGORIAS_PROPIAS_GRATIS} "
             f"categorías propias en total ({propias} usadas). Renombrar, desactivar "
-            f"y categorías ilimitadas son parte de **Premium**."
+            f"y categorías ilimitadas son parte del **Plan Premium**."
         )
 
     tipo_sel = st.selectbox(
@@ -2455,7 +2438,8 @@ def page_configuracion(user):
         st.markdown("##### Agregar categoría")
         st.info(
             f"Llegaste al límite de {LIMITE_CATEGORIAS_PROPIAS_GRATIS} categorías "
-            f"propias del plan gratis. Con **Premium** son ilimitadas. {MSG_PREMIUM}"
+            f"propias del Plan Gratuito. Con el **Plan Premium** son ilimitadas. "
+            f"[Escribinos y activá tu plan]({LINK_WHATSAPP})."
         )
 
     st.divider()
@@ -2799,6 +2783,48 @@ def _dashboard_body(user, estado):
         )
 
 
+def _panel_planes(user, es_prem):
+    """Panel que se abre desde la etiqueta de plan del header: muestra qué incluye
+    cada plan y, si estás en el gratuito, el botón verde para activar el Premium."""
+    _act_grat = "  ·  tu plan actual" if not es_prem else ""
+    _act_prem = "  ·  tu plan actual" if es_prem else ""
+    st.markdown(
+        f"""<div style='border:1px solid {BORDER}; border-radius:12px; padding:18px 20px; background:#fff;'>
+          <div style='font-family:Poppins,sans-serif; font-weight:700; color:{NAVY}; font-size:1.05rem; margin-bottom:14px;'>Tus planes</div>
+          <div style='border:1px solid {BORDER}; border-radius:10px; padding:13px 15px; margin-bottom:12px;'>
+            <div style='font-weight:700; color:{NAVY};'>Plan Gratuito<span style='color:{GREEN}; font-weight:600; font-size:0.82rem;'>{_act_grat}</span></div>
+            <ul style='margin:6px 0 0; padding-left:18px; color:#374151; font-size:0.9rem; line-height:1.65;'>
+              <li>Carga ilimitada de movimientos</li>
+              <li>Pantalla de Inicio completa (KPIs, flujo y gráficos)</li>
+              <li>Categorías por defecto y algunas propias</li>
+              <li>Siempre ves todos tus movimientos</li>
+            </ul>
+          </div>
+          <div style='border:2px solid {CYAN}; border-radius:10px; padding:13px 15px; background:{NAVY_LIGHT};'>
+            <div style='font-weight:700; color:{NAVY};'>Plan Premium<span style='color:{GREEN}; font-weight:600; font-size:0.82rem;'>{_act_prem}</span></div>
+            <div style='color:{TEXT_MUTED}; font-size:0.82rem; margin-top:2px;'>Todo lo del Plan Gratuito, y además:</div>
+            <ul style='margin:6px 0 0; padding-left:18px; color:#374151; font-size:0.9rem; line-height:1.65;'>
+              <li>Reportes Excel de marca (Movimientos y Flujo de Fondos)</li>
+              <li>Control total de categorías: renombrar, desactivar y sin límite</li>
+              <li>Análisis de historial largo <em>(próximamente)</em></li>
+            </ul>
+          </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    if not es_prem:
+        st.markdown(
+            f"<a href='{LINK_WHATSAPP}' target='_blank' style='display:block; text-align:center; "
+            f"background:{GREEN}; color:#fff; font-weight:700; padding:11px; border-radius:9px; "
+            f"text-decoration:none; margin-top:10px;'>Activar plan premium</a>",
+            unsafe_allow_html=True,
+        )
+    if st.button("Cerrar", key="cerrar_planes"):
+        st.session_state["ver_planes"] = False
+        st.rerun()
+    st.divider()
+
+
 # ============================================================================
 # APP PRINCIPAL (LOGUEADO)
 # ============================================================================
@@ -2826,15 +2852,32 @@ def app(user):
             unsafe_allow_html=True,
         )
         _es_prem = es_premium(user)
-        _plan_lbl = "Premium" if _es_prem else "Gratis"
-        _plan_bg = CYAN if _es_prem else GREY
-        st.markdown(
-            f"<div style='text-align:right; margin-top:5px;'>"
-            f"<span style='background:{_plan_bg}; color:#fff; font-size:0.62rem; font-weight:700; "
-            f"letter-spacing:0.06em; padding:2px 9px; border-radius:999px; "
-            f"text-transform:uppercase;'>{_plan_lbl}</span></div>",
-            unsafe_allow_html=True,
-        )
+        _badge_key = "plan_badge_premium" if _es_prem else "plan_badge_gratis"
+        _badge_lbl = "Plan Premium" if _es_prem else "Plan Gratuito"
+        if st.button(_badge_lbl, key=_badge_key, use_container_width=True):
+            st.session_state["ver_planes"] = not st.session_state.get("ver_planes", False)
+            st.rerun()
+
+    # Etiqueta de plan como pastilla (estilo best-effort según la versión de Streamlit).
+    st.markdown(
+        """<style>
+        .st-key-plan_badge_premium button {
+            background:linear-gradient(135deg,#102250,#1595BC) !important;
+            color:#fff !important; border:none !important; border-radius:999px !important;
+            font-weight:700 !important; font-size:0.72rem !important; min-height:0 !important;
+            padding:4px 14px !important; letter-spacing:0.04em !important;
+        }
+        .st-key-plan_badge_gratis button {
+            background:#6C6D6D !important; color:#fff !important; border:none !important;
+            border-radius:999px !important; font-weight:700 !important; font-size:0.72rem !important;
+            min-height:0 !important; padding:4px 14px !important; letter-spacing:0.04em !important;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.get("ver_planes", False):
+        _panel_planes(user, _es_prem)
 
     # Navegación principal, siempre visible en cualquier pantalla.
     page = st.radio("Menú", [
