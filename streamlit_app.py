@@ -1282,6 +1282,18 @@ def calcular_estado_flujo(user_id: str):
     orden = ["Ingreso", "Gasto Fijo", "Gasto Variable", "Ahorro"]
     pivot_completo = pivot_completo.reindex([t for t in orden if t in pivot_completo.index])
 
+    # Devengado: total (monto_total) por tipo y mes de fecha_devengo.
+    # Lo usan las vistas de "cuanto gane/gaste este mes" (KPIs del mes, ritmo y
+    # torta) para coincidir con la pestana Movimientos. La caja se reserva para
+    # Disponible real y para el Flujo de Fondos.
+    df_dev = df.copy()
+    df_dev["mes_dev"] = df_dev["fecha_devengo"].dt.to_period("M").dt.to_timestamp()
+    pivot_dev = df_dev.pivot_table(
+        index="tipo", columns="mes_dev", values="monto_total",
+        aggfunc="sum", fill_value=0,
+    )
+    pivot_dev = pivot_dev.reindex([t for t in orden if t in pivot_dev.index])
+
     flujo_neto = (
         (pivot_completo.loc["Ingreso"] if "Ingreso" in pivot_completo.index else 0)
         - (pivot_completo.loc["Gasto Fijo"] if "Gasto Fijo" in pivot_completo.index else 0)
@@ -1308,7 +1320,9 @@ def calcular_estado_flujo(user_id: str):
 
     return {
         "df_caja": df_caja,
+        "df_dev": df_dev,
         "pivot_completo": pivot_completo,
+        "pivot_dev": pivot_dev,
         "flujo_neto": flujo_neto,
         "meses_todos": meses_todos,
         "ajustes_manuales": ajustes_manuales,
@@ -2471,6 +2485,7 @@ def page_inicio(user):
 # ============================================================================
 def _dashboard_body(user, estado):
     pivot_completo = estado["pivot_completo"]
+    pivot_dev = estado["pivot_dev"]
     flujo_neto = estado["flujo_neto"]
     meses_todos = estado["meses_todos"]
     saldos_fin = estado["saldos_fin"]
@@ -2487,16 +2502,16 @@ def _dashboard_body(user, estado):
     mes_sel = meses_todos[mes_idx]
     mes_lbl_sel = meses_lbl[mes_idx]
 
-    # --- 4 KPIs del mes seleccionado (criterio caja) ---
+    # --- 4 KPIs del mes seleccionado (criterio devengado, coincide con Movimientos) ---
     def safe_get(pivot, tipo, mes):
         if tipo in pivot.index and mes in pivot.columns:
             return float(pivot.loc[tipo, mes])
         return 0.0
 
-    ingresos_mes = safe_get(pivot_completo, "Ingreso", mes_sel)
-    gastos_mes = (safe_get(pivot_completo, "Gasto Fijo", mes_sel)
-                  + safe_get(pivot_completo, "Gasto Variable", mes_sel))
-    ahorro_mes = safe_get(pivot_completo, "Ahorro", mes_sel)
+    ingresos_mes = safe_get(pivot_dev, "Ingreso", mes_sel)
+    gastos_mes = (safe_get(pivot_dev, "Gasto Fijo", mes_sel)
+                  + safe_get(pivot_dev, "Gasto Variable", mes_sel))
+    ahorro_mes = safe_get(pivot_dev, "Ahorro", mes_sel)
     resultado_mes = ingresos_mes - gastos_mes  # el Ahorro no es un gasto: se muestra aparte
 
     st.markdown(f"##### Mes: {mes_lbl_sel}")
@@ -2562,7 +2577,7 @@ def _dashboard_body(user, estado):
     # ------------------------------------------------------------------------
     dias_transc = hoy_d.day
     dias_mes = pd.Timestamp(hoy_d).days_in_month
-    gv_curso = safe_get(pivot_completo, "Gasto Variable", mes_curso_ts)
+    gv_curso = safe_get(pivot_dev, "Gasto Variable", mes_curso_ts)
     if gv_curso > 0:
         st.markdown("##### Ritmo de gasto variable (mes en curso)")
         rg1, rg2, rg3 = st.columns(3)
@@ -2607,38 +2622,41 @@ def _dashboard_body(user, estado):
             key="dash_torta_tipo",
         )
 
-    df_caja = estado["df_caja"]
+    df_dev = estado["df_dev"]
 
     # Filtrar por tipo
     if tipo_torta_sel == "Todos":
-        df_torta_base = df_caja[df_caja["tipo"].isin(["Gasto Fijo", "Gasto Variable", "Ahorro"])].copy()
+        df_torta_base = df_dev[df_dev["tipo"].isin(["Gasto Fijo", "Gasto Variable", "Ahorro"])].copy()
     else:
-        df_torta_base = df_caja[df_caja["tipo"] == tipo_torta_sel].copy()
+        df_torta_base = df_dev[df_dev["tipo"] == tipo_torta_sel].copy()
 
-    # Filtrar por mes
+    # Filtrar por mes (criterio devengado: mes de la fecha de devengo)
     if mes_torta_sel != "Todos los meses":
         df_torta_base = df_torta_base[
-            df_torta_base["mes_pago"].dt.strftime("%m/%Y") == mes_torta_sel
+            df_torta_base["fecha_devengo"].dt.strftime("%m/%Y") == mes_torta_sel
         ]
 
     if df_torta_base.empty:
         st.caption("No hay datos en la selección.")
     else:
-        df_torta = (df_torta_base.groupby("categoria", as_index=False)["monto_cuota"].sum()
-                    .sort_values("monto_cuota", ascending=False))
-        total_torta = df_torta["monto_cuota"].sum()
+        df_torta = (df_torta_base.groupby("categoria", as_index=False)["monto_total"].sum()
+                    .sort_values("monto_total", ascending=False))
+        total_torta = df_torta["monto_total"].sum()
+        df_torta["monto_fmt"] = df_torta["monto_total"].apply(fmt_money)
         paleta = [NAVY, CYAN, ORANGE, GREEN, GREY,
                   NAVY_HOVER, "#3aa9c9", "#f08259", "#3fa85a", "#9aa0a6"]
         fig_torta = px.pie(
-            df_torta, names="categoria", values="monto_cuota",
+            df_torta, names="categoria", values="monto_total",
             hole=0.55,
             color_discrete_sequence=paleta,
+            custom_data=["monto_fmt"],
         )
         fig_torta.update_traces(
             textposition="outside",
             textinfo="label+percent",
             automargin=True,
             marker=dict(line=dict(color="white", width=2)),
+            hovertemplate="<b>%{label}</b><br>%{customdata[0]}<br>%{percent}<extra></extra>",
         )
         fig_torta = aplicar_tema_plotly(fig_torta, height=560)
         fig_torta.update_layout(margin=dict(t=55, b=55, l=70, r=70))
