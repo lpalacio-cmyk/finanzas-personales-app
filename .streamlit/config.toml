@@ -7,3 +7,6 @@ textColor = "#22263a"
 
 [client]
 toolbarMode = "minimal"
+# Ante un error, el usuario ve un mensaje genérico en vez del traceback de
+# Python. El detalle completo sigue visible en los logs (Manage app).
+showErrorDetails = "none"
