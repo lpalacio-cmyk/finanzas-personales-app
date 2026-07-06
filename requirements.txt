@@ -1,8 +1,13 @@
-streamlit>=1.30
-supabase>=2.5
-pandas>=2.0
-openpyxl>=3.1
-python-dateutil>=2.8
-plotly>=5.18
-Pillow>=10.0
-extra-streamlit-components>=0.1.70
+# Versiones FIJADAS el 06/07/2026 (auditoría Prioridad A).
+# Verificadas: co-instalan sin conflictos y los patrones de pandas de la
+# app pasan en 3.0.3. Actualizar a propósito y de a una, nunca por accidente.
+streamlit==1.59.0
+supabase==2.31.0
+pandas==3.0.3
+openpyxl==3.1.5
+python-dateutil==2.9.0.post0
+plotly==6.8.0
+Pillow==12.3.0
+extra-streamlit-components==0.1.81
+httpx==0.28.1
+tzdata==2026.2
