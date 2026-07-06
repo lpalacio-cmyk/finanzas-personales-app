@@ -2,6 +2,24 @@
 Finanzas para Protagonistas - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 4.5 — Auditoría Prioridad A: hora argentina, versiones fijas, errores
+- Zona horaria: toda la lógica de calendario ("hoy", mes en curso, fecha
+  default al cargar movimientos, vencimiento del premium, fechas de los
+  reportes) usa hora argentina (America/Argentina/Catamarca). Antes el
+  servidor (UTC) adelantaba el día a partir de las 21:00 hora local.
+- requirements.txt: versiones EXACTAS fijadas y verificadas entre sí (antes
+  cada reinicio del servidor instalaba "lo último" y podía romper la app
+  sin tocar nada). Se declaran httpx (se usaba sin estar listado) y tzdata.
+  REQUIERE REBOOT.
+- config.toml: showErrorDetails = "none" — ante un error el usuario ve un
+  mensaje genérico en vez del traceback de Python; el detalle completo
+  sigue en los logs de Streamlit Cloud (Manage app). Mismo reboot.
+- Seguridad: nombre del usuario, nombres de categorías y email se escapan
+  (html.escape) antes de interpolarse en bloques HTML.
+- Fix: la vista previa de la conciliación de saldo ya no se rompe (tenía
+  tres $ en un texto => LaTeX). Nuevo helper global fmt_money_md con la
+  entidad &#36;, que ahora también usa el caption de la torta.
+
 Versión 4.4 — Inicio: doble lectura de % en la torta + ritmo de gasto histórico
 - Composición por categoría: las etiquetas muestran el % clásico sobre el
   total del gráfico (coherente con las porciones, suma 100%, formato es-AR).
@@ -156,6 +174,8 @@ import hashlib
 import secrets as _secrets
 import httpx
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
+from html import escape as html_escape
 import extra_streamlit_components as stx
 from dateutil.relativedelta import relativedelta
 import pandas as pd
@@ -169,6 +189,22 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.drawing.image import Image as _XLImage
 from openpyxl.utils import get_column_letter as _col
 from openpyxl.worksheet.properties import PageSetupProperties
+
+# ============================================================================
+# ZONA HORARIA (el servidor corre en UTC: sin esto, "hoy" y "mes en curso"
+# saltan al día siguiente a partir de las 21:00 hora argentina)
+# ============================================================================
+TZ_AR = ZoneInfo("America/Argentina/Catamarca")
+
+def ahora_ar():
+    """datetime actual en hora argentina."""
+    return datetime.now(TZ_AR)
+
+def hoy_ar():
+    """date actual en hora argentina. Usar SIEMPRE en vez de date.today()
+    para lógica de calendario. (Las expiraciones de cookies quedan con
+    datetime.now(): ahí solo importa la duración, no el calendario.)"""
+    return ahora_ar().date()
 
 # ============================================================================
 # CONSTANTES DE MARCA (Manual de Identidad WL HNOS & ASOC)
@@ -786,7 +822,7 @@ def es_premium(user) -> bool:
     if not vence:
         return True
     try:
-        return pd.to_datetime(vence).date() >= date.today()
+        return pd.to_datetime(vence).date() >= hoy_ar()
     except Exception:
         return True
 
@@ -1065,6 +1101,13 @@ def fmt_money(n, decimals: int = 2):
     except Exception:
         return str(n)
 
+def fmt_money_md(n, decimals: int = 2):
+    """fmt_money para textos que pasan por st.markdown/st.caption con MÁS DE
+    UN monto: usa la entidad HTML &#36; en vez del carácter $, porque dos $
+    en el mismo texto hacen que Streamlit interprete el tramo intermedio
+    como fórmula LaTeX y lo rompa. En pantalla se ve un $ normal."""
+    return fmt_money(n, decimals).replace("$", "&#36;")
+
 def df_movimientos(user_id):
     movs = get_movimientos(user_id)
     if not movs:
@@ -1122,7 +1165,7 @@ def _xl_setup_sheet(ws, report_name, periodo, ncols):
     ws["B1"].alignment = Alignment(vertical="center")
     ws["B2"] = report_name
     ws["B2"].font = Font(name=_XL_FONT, size=11, bold=True, color=_XL_DARK)
-    ws["B3"] = f"Período: {periodo}   ·   Emitido: {date.today().strftime('%d/%m/%Y')}"
+    ws["B3"] = f"Período: {periodo}   ·   Emitido: {hoy_ar().strftime('%d/%m/%Y')}"
     ws["B3"].font = Font(name=_XL_FONT, size=9, color=_XL_GREY)
     ws.row_dimensions[1].height = 20
     ws.row_dimensions[2].height = 17
@@ -1177,7 +1220,7 @@ def _xl_footer(ws, row, ncols):
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
     c = ws.cell(row=row, column=1,
                 value=("WL HNOS & ASOC   ·   wlhnos.vercel.app   ·   "
-                       f"Reporte generado el {date.today().strftime('%d/%m/%Y')}"))
+                       f"Reporte generado el {hoy_ar().strftime('%d/%m/%Y')}"))
     c.font = Font(name=_XL_FONT, size=8, italic=True, color=_XL_GREY)
     c.alignment = Alignment(horizontal="left")
 
@@ -1310,7 +1353,7 @@ def _default_mes_idx(meses_ts):
     """Índice del mes en curso en la lista; si no está, el mes más reciente
     no futuro; si todos son futuros, el primero. Evita que los selectores
     arranquen en meses proyectados por cuotas."""
-    hoy = date.today()
+    hoy = hoy_ar()
     mes_act = pd.Timestamp(hoy.year, hoy.month, 1)
     candidatos = [i for i, m in enumerate(meses_ts) if pd.Timestamp(m) <= mes_act]
     if not candidatos:
@@ -1319,7 +1362,7 @@ def _default_mes_idx(meses_ts):
 
 def rango_fechas_default(df, columna="fecha_devengo"):
     if df.empty:
-        hoy = date.today()
+        hoy = hoy_ar()
         return hoy.replace(day=1), hoy
     hasta = df[columna].max().date()
     desde = (hasta - relativedelta(months=11)).replace(day=1)
@@ -1697,7 +1740,7 @@ def page_cargar(user):
     with st.form("nuevo_mov", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
-            fecha_devengo = st.date_input("Fecha del movimiento", value=date.today(),
+            fecha_devengo = st.date_input("Fecha del movimiento", value=hoy_ar(),
                                           format="DD/MM/YYYY")
         with col2:
             if not opciones_cat:
@@ -1715,7 +1758,7 @@ def page_cargar(user):
             with col3:
                 cuotas = st.number_input("Cuotas", min_value=1, max_value=36, value=1, step=1)
             with col4:
-                inicio_pago = st.date_input("Inicio pago (primera cuota)", value=date.today(),
+                inicio_pago = st.date_input("Inicio pago (primera cuota)", value=hoy_ar(),
                                             format="DD/MM/YYYY")
             st.caption(
                 "El movimiento completo impacta en el Estado de Resultados en su fecha "
@@ -1747,7 +1790,7 @@ def page_cargar(user):
     with st.expander("Copiar fijos e ingresos del mes anterior"):
         if st.session_state.pop("flash_copia", None):
             st.success("Movimientos copiados")
-        hoy = date.today()
+        hoy = hoy_ar()
         per_dest = pd.Period(date(hoy.year, hoy.month, 1), "M")
         per_orig = per_dest - 1
         df_all = df_movimientos(user.id)
@@ -2265,8 +2308,8 @@ def _reporte_flujo(user):
             f"border-radius: 8px; padding: 12px 16px; margin: 8px 0;'>"
             f"<div style='color: var(--text-muted); font-size: 0.85rem;'>Vista previa para {mes_lbl_sel}:</div>"
             f"<div style='font-family: Poppins, sans-serif; color: var(--navy); margin-top: 4px;'>"
-            f"Según la app: {fmt_money(saldo_fin_actual)} · Tu saldo real: {fmt_money(float(saldo_real or 0.0))} · "
-            f"Ajuste a registrar: <strong>{fmt_money(delta)}</strong>"
+            f"Según la app: {fmt_money_md(saldo_fin_actual)} · Tu saldo real: {fmt_money_md(float(saldo_real or 0.0))} · "
+            f"Ajuste a registrar: <strong>{fmt_money_md(delta)}</strong>"
             f"</div></div>",
             unsafe_allow_html=True,
         )
@@ -2534,7 +2577,7 @@ def _row_categoria(user, c, activa, conteos, premium):
             badge = (f"  <span style='color:{TEXT_MUTED};font-size:0.8em;'>"
                      f"({afectados} mov.)</span>") if afectados > 0 else ""
             st.markdown(
-                f"<div style='padding-top:8px;'><strong style='color:{NAVY};'>{nombre_actual}</strong>{badge}</div>",
+                f"<div style='padding-top:8px;'><strong style='color:{NAVY};'>{html_escape(nombre_actual)}</strong>{badge}</div>",
                 unsafe_allow_html=True,
             )
         with col2:
@@ -2593,7 +2636,7 @@ def _nombre_de_usuario(user):
 
 def page_inicio(user):
     nombre = _nombre_de_usuario(user)
-    page_header(f"Hola, {nombre}", "Tus finanzas desde un solo lugar.")
+    page_header(f"Hola, {html_escape(nombre)}", "Tus finanzas desde un solo lugar.")
 
     estado = calcular_estado_flujo(user.id)
     if estado is None:
@@ -2665,7 +2708,7 @@ def _dashboard_body(user, estado):
     # DISPONIBLE REAL (independiente del mes seleccionado arriba)
     # Saldo a fin del mes en curso vs cuotas de gastos ya comprometidas a futuro.
     # ------------------------------------------------------------------------
-    hoy_d = date.today()
+    hoy_d = hoy_ar()
     mes_curso_ts = pd.Timestamp(hoy_d.year, hoy_d.month, 1)
     df_caja_all = estado["df_caja"]
     comprometido = float(df_caja_all[
@@ -2841,20 +2884,15 @@ def _dashboard_body(user, estado):
         fig_torta.update_layout(showlegend=False)
         st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
 
-        def _money_md(n):
-            # $ escapado para usar en st.caption/st.markdown: con dos $ en el
-            # mismo texto, Streamlit interpreta el tramo como LaTeX y lo rompe.
-            return fmt_money(n).replace("$", "\\$")
-
         cap = (
             f"Total {tipo_torta_sel.lower() if tipo_torta_sel != 'Todos' else 'gastos + ahorro'} "
             f"en {mes_torta_sel.lower() if mes_torta_sel != 'Todos los meses' else 'todos los meses'}: "
-            f"**{_money_md(total_torta)}**"
+            f"**{fmt_money_md(total_torta)}**"
         )
         if ing_periodo > 0:
             cap += (
                 f" — equivale al **{_pct(total_torta / ing_periodo * 100)}** de tus ingresos "
-                f"del período ({_money_md(ing_periodo)}). Tocá una porción para ver "
+                f"del período ({fmt_money_md(ing_periodo)}). Tocá una porción para ver "
                 f"también su % sobre tus ingresos."
             )
         st.caption(cap)
@@ -2925,7 +2963,7 @@ def app(user):
             do_signout()
         st.markdown(
             f"<div style='text-align:right; color:{TEXT_MUTED}; font-size:0.72rem; "
-            f"margin-top:4px; word-break:break-all;'>{user.email}</div>",
+            f"margin-top:4px; word-break:break-all;'>{html_escape(user.email or '')}</div>",
             unsafe_allow_html=True,
         )
         _es_prem = es_premium(user)
