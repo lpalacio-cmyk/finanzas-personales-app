@@ -8,6 +8,9 @@ Versión 4.4 — Inicio: doble lectura de % en la torta + ritmo de gasto histór
   Al tocar/pasar por una porción se ve además qué % de los INGRESOS del
   período representa. El caption indica a qué % de los ingresos equivale
   el total del gráfico (con el filtro en Ahorro: tasa de ahorro directa).
+  Fix: el texto del hover se arma en Python en una sola columna (Plotly no
+  sustituye bien customdata[i] en tortas) y el caption escapa los $ para
+  que Streamlit no los interprete como LaTeX.
 - Ritmo de gasto variable: ahora sigue al selector "Mes a analizar".
   Mes en curso = igual que antes (gastado a hoy, promedio diario y
   proyección). Mes cerrado = total del mes y promedio sobre todos sus
@@ -2809,45 +2812,49 @@ def _dashboard_body(user, estado):
         # porciones, suma 100%), en formato es-AR.
         den_total = total_torta if total_torta > 0 else 1.0  # defensivo
         df_torta["pct_total_fmt"] = (df_torta["monto_total"] / den_total * 100).apply(_pct)
-        custom_cols = ["monto_fmt", "pct_total_fmt"]
 
-        # Hover: se agrega el % sobre los ingresos del período, si los hay.
+        # Detalle del hover pre-armado en UNA sola columna: en las tortas,
+        # Plotly no sustituye bien %{customdata[i]} dentro del hovertemplate
+        # (pega toda la fila junta), así que el texto se arma acá.
+        df_torta["hover_fmt"] = (df_torta["monto_fmt"] + "<br>"
+                                 + df_torta["pct_total_fmt"] + " del total")
         if ing_periodo > 0:
             df_torta["pct_ing_fmt"] = (df_torta["monto_total"] / ing_periodo * 100).apply(_pct)
-            custom_cols.append("pct_ing_fmt")
+            df_torta["hover_fmt"] += " · " + df_torta["pct_ing_fmt"] + " de tus ingresos"
 
         fig_torta = px.pie(
             df_torta, names="categoria", values="monto_total",
             hole=0.55,
             color_discrete_sequence=paleta,
-            custom_data=custom_cols,
+            custom_data=["hover_fmt"],
         )
-        hover = ("<b>%{label}</b><br>%{customdata[0]}<br>"
-                 "%{customdata[1]} del total")
-        if ing_periodo > 0:
-            hover += " · %{customdata[2]} de tus ingresos"
-        hover += "<extra></extra>"
         fig_torta.update_traces(
             textposition="outside",
-            texttemplate="%{label}<br>%{customdata[1]}",
+            text=df_torta["pct_total_fmt"].tolist(),
+            texttemplate="%{label}<br>%{text}",
             automargin=True,
             marker=dict(line=dict(color="white", width=2)),
-            hovertemplate=hover,
+            hovertemplate="<b>%{label}</b><br>%{customdata[0]}<extra></extra>",
         )
         fig_torta = aplicar_tema_plotly(fig_torta, height=560)
         fig_torta.update_layout(margin=dict(t=55, b=55, l=70, r=70))
         fig_torta.update_layout(showlegend=False)
         st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
 
+        def _money_md(n):
+            # $ escapado para usar en st.caption/st.markdown: con dos $ en el
+            # mismo texto, Streamlit interpreta el tramo como LaTeX y lo rompe.
+            return fmt_money(n).replace("$", "\\$")
+
         cap = (
             f"Total {tipo_torta_sel.lower() if tipo_torta_sel != 'Todos' else 'gastos + ahorro'} "
             f"en {mes_torta_sel.lower() if mes_torta_sel != 'Todos los meses' else 'todos los meses'}: "
-            f"**{fmt_money(total_torta)}**"
+            f"**{_money_md(total_torta)}**"
         )
         if ing_periodo > 0:
             cap += (
                 f" — equivale al **{_pct(total_torta / ing_periodo * 100)}** de tus ingresos "
-                f"del período ({fmt_money(ing_periodo)}). Tocá una porción para ver "
+                f"del período ({_money_md(ing_periodo)}). Tocá una porción para ver "
                 f"también su % sobre tus ingresos."
             )
         st.caption(cap)
