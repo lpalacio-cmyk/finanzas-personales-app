@@ -2,6 +2,17 @@
 Finanzas para Protagonistas - App de finanzas personales
 Conectada a Supabase con autenticación multi-usuario.
 
+Versión 4.4 — Inicio: doble lectura de % en la torta + ritmo de gasto histórico
+- Composición por categoría: las etiquetas muestran el % clásico sobre el
+  total del gráfico (coherente con las porciones, suma 100%, formato es-AR).
+  Al tocar/pasar por una porción se ve además qué % de los INGRESOS del
+  período representa. El caption indica a qué % de los ingresos equivale
+  el total del gráfico (con el filtro en Ahorro: tasa de ahorro directa).
+- Ritmo de gasto variable: ahora sigue al selector "Mes a analizar".
+  Mes en curso = igual que antes (gastado a hoy, promedio diario y
+  proyección). Mes cerrado = total del mes y promedio sobre todos sus
+  días, sin proyección. Mes futuro = no se muestra.
+
 Versión 4.3 — Auth parte 2: Google, sesión persistente y sidebar mobile
 - Botón "Continuar con Google" en el login (Supabase OAuth, flujo implícito:
   un JS mueve los tokens del fragmento #... a query params y la app inicia
@@ -2687,28 +2698,48 @@ def _dashboard_body(user, estado):
         st.divider()
 
     # ------------------------------------------------------------------------
-    # RITMO DE GASTO VARIABLE (mes en curso)
+    # RITMO DE GASTO VARIABLE (sigue al "Mes a analizar" de arriba)
+    # - Mes en curso: gastado a hoy, promedio por día transcurrido y proyección.
+    # - Mes cerrado: total del mes y promedio sobre todos sus días (histórico).
+    # - Mes futuro: no aplica (no hay días transcurridos), no se muestra.
     # ------------------------------------------------------------------------
-    dias_transc = hoy_d.day
-    dias_mes = pd.Timestamp(hoy_d).days_in_month
-    gv_curso = safe_get(pivot_dev, "Gasto Variable", mes_curso_ts)
-    if gv_curso > 0:
-        st.markdown("##### Ritmo de gasto variable (mes en curso)")
-        rg1, rg2, rg3 = st.columns(3)
-        with rg1:
-            st.markdown(metric_card("Gastado al día de hoy", fmt_money(gv_curso)),
-                        unsafe_allow_html=True)
-        with rg2:
-            st.markdown(metric_card("Promedio diario", fmt_money(gv_curso / dias_transc),
-                                    "orange"), unsafe_allow_html=True)
-        with rg3:
-            st.markdown(metric_card(f"Proyectado a fin de {mes_curso_ts.strftime('%m/%Y')}",
-                                    fmt_money(gv_curso / dias_transc * dias_mes), "orange"),
-                        unsafe_allow_html=True)
-        st.caption(
-            f"Promedio = gasto variable acumulado dividido los {dias_transc} días "
-            f"transcurridos. El proyectado asume que seguís a este ritmo."
-        )
+    mes_sel_ts = pd.Timestamp(mes_sel)
+    gv_mes = safe_get(pivot_dev, "Gasto Variable", mes_sel)
+    if gv_mes > 0 and mes_sel_ts <= mes_curso_ts:
+        dias_mes_sel = mes_sel_ts.days_in_month
+        if mes_sel_ts == mes_curso_ts:
+            # --- Mes en curso: comportamiento original ---
+            dias_transc = hoy_d.day
+            st.markdown("##### Ritmo de gasto variable (mes en curso)")
+            rg1, rg2, rg3 = st.columns(3)
+            with rg1:
+                st.markdown(metric_card("Gastado al día de hoy", fmt_money(gv_mes)),
+                            unsafe_allow_html=True)
+            with rg2:
+                st.markdown(metric_card("Promedio diario", fmt_money(gv_mes / dias_transc),
+                                        "orange"), unsafe_allow_html=True)
+            with rg3:
+                st.markdown(metric_card(f"Proyectado a fin de {mes_sel_ts.strftime('%m/%Y')}",
+                                        fmt_money(gv_mes / dias_transc * dias_mes_sel), "orange"),
+                            unsafe_allow_html=True)
+            st.caption(
+                f"Promedio = gasto variable acumulado dividido los {dias_transc} días "
+                f"transcurridos. El proyectado asume que seguís a este ritmo."
+            )
+        else:
+            # --- Mes cerrado: histórico, sin proyección ---
+            st.markdown(f"##### Ritmo de gasto variable ({mes_sel_ts.strftime('%m/%Y')})")
+            rg1, rg2 = st.columns(2)
+            with rg1:
+                st.markdown(metric_card("Gastado en el mes", fmt_money(gv_mes)),
+                            unsafe_allow_html=True)
+            with rg2:
+                st.markdown(metric_card("Promedio diario", fmt_money(gv_mes / dias_mes_sel),
+                                        "orange"), unsafe_allow_html=True)
+            st.caption(
+                f"Mes cerrado: promedio = gasto variable total dividido los "
+                f"{dias_mes_sel} días de {mes_sel_ts.strftime('%m/%Y')}."
+            )
         st.divider()
 
     # ------------------------------------------------------------------------
@@ -2750,37 +2781,76 @@ def _dashboard_body(user, estado):
             df_torta_base["fecha_devengo"].dt.strftime("%m/%Y") == mes_torta_sel
         ]
 
+    # Ingresos del mismo período (criterio devengado): segunda lectura del
+    # gráfico — cuánto de lo que entró se lleva cada porción (hover y caption).
+    if mes_torta_sel != "Todos los meses":
+        ing_periodo = float(df_dev[
+            (df_dev["tipo"] == "Ingreso") &
+            (df_dev["fecha_devengo"].dt.strftime("%m/%Y") == mes_torta_sel)
+        ]["monto_total"].sum())
+    else:
+        ing_periodo = float(df_dev[df_dev["tipo"] == "Ingreso"]["monto_total"].sum())
+
     if df_torta_base.empty:
         st.caption("No hay datos en la selección.")
     else:
+        def _pct(p):
+            # Formato es-AR: 12,3%
+            return f"{p:.1f}%".replace(".", ",")
+
         df_torta = (df_torta_base.groupby("categoria", as_index=False)["monto_total"].sum()
                     .sort_values("monto_total", ascending=False))
         total_torta = df_torta["monto_total"].sum()
         df_torta["monto_fmt"] = df_torta["monto_total"].apply(fmt_money)
         paleta = [NAVY, CYAN, ORANGE, GREEN, GREY,
                   NAVY_HOVER, "#3aa9c9", "#f08259", "#3fa85a", "#9aa0a6"]
+
+        # Etiquetas: % clásico sobre el total del gráfico (coherente con las
+        # porciones, suma 100%), en formato es-AR.
+        den_total = total_torta if total_torta > 0 else 1.0  # defensivo
+        df_torta["pct_total_fmt"] = (df_torta["monto_total"] / den_total * 100).apply(_pct)
+        custom_cols = ["monto_fmt", "pct_total_fmt"]
+
+        # Hover: se agrega el % sobre los ingresos del período, si los hay.
+        if ing_periodo > 0:
+            df_torta["pct_ing_fmt"] = (df_torta["monto_total"] / ing_periodo * 100).apply(_pct)
+            custom_cols.append("pct_ing_fmt")
+
         fig_torta = px.pie(
             df_torta, names="categoria", values="monto_total",
             hole=0.55,
             color_discrete_sequence=paleta,
-            custom_data=["monto_fmt"],
+            custom_data=custom_cols,
         )
+        hover = ("<b>%{label}</b><br>%{customdata[0]}<br>"
+                 "%{customdata[1]} del total")
+        if ing_periodo > 0:
+            hover += " · %{customdata[2]} de tus ingresos"
+        hover += "<extra></extra>"
         fig_torta.update_traces(
             textposition="outside",
-            textinfo="label+percent",
+            texttemplate="%{label}<br>%{customdata[1]}",
             automargin=True,
             marker=dict(line=dict(color="white", width=2)),
-            hovertemplate="<b>%{label}</b><br>%{customdata[0]}<br>%{percent}<extra></extra>",
+            hovertemplate=hover,
         )
         fig_torta = aplicar_tema_plotly(fig_torta, height=560)
         fig_torta.update_layout(margin=dict(t=55, b=55, l=70, r=70))
         fig_torta.update_layout(showlegend=False)
         st.plotly_chart(fig_torta, use_container_width=True, config={"displayModeBar": False})
-        st.caption(
+
+        cap = (
             f"Total {tipo_torta_sel.lower() if tipo_torta_sel != 'Todos' else 'gastos + ahorro'} "
             f"en {mes_torta_sel.lower() if mes_torta_sel != 'Todos los meses' else 'todos los meses'}: "
             f"**{fmt_money(total_torta)}**"
         )
+        if ing_periodo > 0:
+            cap += (
+                f" — equivale al **{_pct(total_torta / ing_periodo * 100)}** de tus ingresos "
+                f"del período ({fmt_money(ing_periodo)}). Tocá una porción para ver "
+                f"también su % sobre tus ingresos."
+            )
+        st.caption(cap)
 
 
 def _panel_planes(user, es_prem):
