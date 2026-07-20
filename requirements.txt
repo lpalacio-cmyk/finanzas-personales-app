@@ -1,9 +1,15 @@
-# Versiones FIJADAS el 06/07/2026 (auditoría Prioridad A).
-# Verificadas: co-instalan sin conflictos y los patrones de pandas de la
-# app pasan en 3.0.3. Actualizar a propósito y de a una, nunca por accidente.
+# Versiones FIJADAS a un stack MADURO (no el más nuevo) — corrección del
+# 20/07/2026 tras un segmentation fault en producción. El pin anterior usaba
+# la última versión de todo (Python 3.14 + pandas 3.0 + numpy 2.5 + pyarrow 25),
+# combinación recién salida y con caídas nativas intermitentes.
+# Se fijan explícitamente numpy y pyarrow (las piezas nativas que antes
+# flotaban a la última; pyarrow es lo que Streamlit usa para las tablas).
+# IMPORTANTE: además fijar Python 3.13 en Streamlit Cloud
+# (Manage app -> Settings -> Advanced settings -> Python version).
 streamlit==1.59.0
-supabase==2.31.0
-pandas==3.0.3
+pandas==2.3.3
+numpy==2.2.6
+pyarrow==21.0.0
 openpyxl==3.1.5
 python-dateutil==2.9.0.post0
 plotly==6.8.0
