@@ -7,6 +7,7 @@
 # IMPORTANTE: además fijar Python 3.13 en Streamlit Cloud
 # (Manage app -> Settings -> Advanced settings -> Python version).
 streamlit==1.59.0
+supabase==2.31.0
 pandas==2.3.3
 numpy==2.2.6
 pyarrow==21.0.0
